@@ -1,0 +1,89 @@
+framework:
+    messenger:
+        serializer:
+            default_serializer: messenger.transport.symfony_serializer
+            symfony_serializer:
+                format: json
+                context: { }
+        default_bus: event.bus
+
+        buses:
+            command.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: false
+                middleware:
+                    - messenger_workflow.add_message_id_stamp_middleware
+                    - messenger_workflow.command_middleware
+
+            query.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: false
+                middleware:
+                    - messenger_workflow.add_message_id_stamp_middleware
+                    - messenger_workflow.query_middleware
+
+            event.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: false
+                middleware:
+                    - messenger_workflow.add_message_id_stamp_middleware
+                    - messenger_workflow.event_middleware
+
+            outbox.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: true
+                middleware:
+                    - messenger_workflow.add_message_id_stamp_middleware
+                    - messenger_workflow.outbox_middleware
+
+            inbox.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: true
+                middleware:
+                    - messenger_workflow.add_message_id_stamp_middleware
+                    - messenger_workflow.inbox_middleware
+
+        transports:
+            commands:
+                options:
+                    auto_setup: false
+                    exchange:
+                        name: commands
+                        type: direct
+                    delay:
+                        exchange:
+                            name: commands.delay
+                            type: direct
+
+            queries:
+                options:
+                    auto_setup: false
+                    exchange:
+                        name: queries
+                        type: direct
+                    delay:
+                        exchange:
+                            name: queries.delay
+                            type: direct
+
+            events:
+                options:
+                    auto_setup: false
+                    exchange:
+                        name: events
+                        type: topic
+
+        routing:
+            'MessengerWorkflow\Domain\DomainEventInterface': events
+            'MessengerWorkflow\Application\CommandInterface': commands
+            'MessengerWorkflow\Application\QueryInterface': queries

@@ -1,0 +1,5 @@
+*.md
+*.sh
+.phpunit.cache
+composer.lock
+vendor
