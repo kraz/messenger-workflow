@@ -84,6 +84,6 @@ framework:
                         type: topic
 
         routing:
-            'MessengerWorkflow\Domain\DomainEventInterface': events
-            'MessengerWorkflow\Application\CommandInterface': commands
-            'MessengerWorkflow\Application\QueryInterface': queries
+            'Kraz\MessengerWorkflow\Domain\DomainEventInterface': events
+            'Kraz\MessengerWorkflow\Application\CommandInterface': commands
+            'Kraz\MessengerWorkflow\Application\QueryInterface': queries
