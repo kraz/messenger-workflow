@@ -220,7 +220,10 @@ final class MessengerWorkflowBundle extends AbstractBundle
 
         // Event bus
         $this->registerAttributeMessengerHandler($builder, AsEventHandler::class, 'event.bus');
-        $services->set(EventBusInterface::class)->class(EventBus::class);
+        $services
+            ->set(EventBusInterface::class)
+            ->class(EventBus::class)
+            ->args([service('event.bus')]);
         $services->set('messenger_workflow.event_middleware')
             ->class(EventMiddleware::class)
             ->arg('$receiverLocator', service('messenger.receiver_locator'))
@@ -240,7 +243,9 @@ final class MessengerWorkflowBundle extends AbstractBundle
 
         // Command bus
         $this->registerAttributeMessengerHandler($builder, AsCommandHandler::class, 'command.bus');
-        $services->set(CommandBusInterface::class)->class(CommandBus::class);
+        $services->set(CommandBusInterface::class)
+            ->class(CommandBus::class)
+            ->args([service('command.bus')]);
         $services->set('messenger_workflow.command_middleware')
             ->class(CommandMiddleware::class)
             ->arg('$receiverLocator', service('messenger.receiver_locator'))
@@ -262,7 +267,9 @@ final class MessengerWorkflowBundle extends AbstractBundle
 
         // Query bus
         $this->registerAttributeMessengerHandler($builder, AsQueryHandler::class, 'query.bus');
-        $services->set(QueryBusInterface::class)->class(QueryBus::class);
+        $services->set(QueryBusInterface::class)
+            ->class(QueryBus::class)
+            ->args([service('query.bus')]);
         $services->set('messenger_workflow.query_middleware')
             ->class(QueryMiddleware::class)
             ->arg('$receiverLocator', service('messenger.receiver_locator'))
@@ -285,7 +292,8 @@ final class MessengerWorkflowBundle extends AbstractBundle
             ->args([service('doctrine'), service('messenger_workflow.postgresql_notify_on_idle_listener')])
             ->tag('messenger.transport_factory');
         $services->set('messenger_workflow.inbox_middleware')
-            ->class(InboxMiddleware::class);
+            ->class(InboxMiddleware::class)
+            ->args([service('inbox.bus')]);
 
         // Event listeners
         $services
