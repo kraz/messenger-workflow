@@ -22,7 +22,6 @@
         "php": ">=8.4",
         "ext-redis": "*",
         "doctrine/orm": "^3.6",
-        "jwage/phpamqplib-messenger": "0.9.50",
         "symfony/console": "^8.1",
         "symfony/doctrine-messenger": "^8.1",
         "symfony/messenger": "^8.1",
@@ -54,11 +53,5 @@
             "dealerdirect/phpcodesniffer-composer-installer": true
         }
     },
-    "minimum-stability": "stable",
-    "repositories": [
-        {
-            "type": "vcs",
-            "url": "https://github.com/kraz/phpamqplib-messenger"
-        }
-    ]
+    "minimum-stability": "stable"
 }
