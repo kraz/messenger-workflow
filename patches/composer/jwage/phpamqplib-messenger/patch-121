@@ -1,0 +1,306 @@
+Subject: [PATCH] Add support for Symfony 8.1
+---
+Index: src/Compat/BundleBase.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/Compat/BundleBase.php b/src/Compat/BundleBase.php
+new file mode 100644
+--- /dev/null	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
++++ b/src/Compat/BundleBase.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -0,0 +1,21 @@
++<?php
++
++declare(strict_types=1);
++
++namespace Jwage\PhpAmqpLibMessengerBundle\Compat;
++
++use Symfony\Component\DependencyInjection\Kernel\AbstractBundle;
++use Symfony\Component\HttpKernel\Bundle\Bundle;
++
++use function class_exists;
++
++// phpcs:disable PSR1.Classes.ClassDeclaration.MultipleClasses
++if (class_exists(AbstractBundle::class)) {
++    abstract class BundleBase extends AbstractBundle
++    {
++    }
++} else {
++    abstract class BundleBase extends Bundle
++    {
++    }
++}
+Index: src/PhpAmqpLibMessengerBundle.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/PhpAmqpLibMessengerBundle.php b/src/PhpAmqpLibMessengerBundle.php
+--- a/src/PhpAmqpLibMessengerBundle.php	(revision dbc2d7bf3ba94bafafd453d43c772aa806fcf9e2)
++++ b/src/PhpAmqpLibMessengerBundle.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -4,13 +4,14 @@
+ 
+ namespace Jwage\PhpAmqpLibMessengerBundle;
+ 
++use Jwage\PhpAmqpLibMessengerBundle\Compat\BundleBase;
+ use Jwage\PhpAmqpLibMessengerBundle\DependencyInjection\PhpAmqpLibMessengerCompilerPass;
++use Jwage\PhpAmqpLibMessengerBundle\DependencyInjection\PhpAmqpLibMessengerExtension;
+ use Override;
+ use Symfony\Component\DependencyInjection\ContainerBuilder;
+-use Symfony\Component\HttpKernel\Bundle\Bundle;
++use Symfony\Component\DependencyInjection\Extension\ExtensionInterface;
+ 
+-/** @psalm-suppress DeprecatedInterface */
+-class PhpAmqpLibMessengerBundle extends Bundle
++class PhpAmqpLibMessengerBundle extends BundleBase
+ {
+     #[Override]
+     public function build(ContainerBuilder $container): void
+@@ -19,4 +20,12 @@
+ 
+         $container->addCompilerPass(new PhpAmqpLibMessengerCompilerPass());
+     }
++
++    private PhpAmqpLibMessengerExtension|null $bundleExtension = null;
++
++    #[Override]
++    public function getContainerExtension(): ExtensionInterface|null
++    {
++        return $this->bundleExtension ??= new PhpAmqpLibMessengerExtension();
++    }
+ }
+Index: src/Transport/AmqpConsumer.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/Transport/AmqpConsumer.php b/src/Transport/AmqpConsumer.php
+--- a/src/Transport/AmqpConsumer.php	(revision dbc2d7bf3ba94bafafd453d43c772aa806fcf9e2)
++++ b/src/Transport/AmqpConsumer.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -13,6 +13,8 @@
+ use Psr\Log\LoggerInterface;
+ use Symfony\Component\Messenger\Exception\TransportException;
+ 
++use function array_shift;
++
+ class AmqpConsumer
+ {
+     /** @var array<AmqpEnvelope> */
+@@ -20,6 +22,8 @@
+ 
+     private string|null $consumerTag = null;
+ 
++    private int|null $effectivePrefetchCount = null;
++
+     public function __construct(
+         private Connection $connection,
+         private ConnectionConfig $connectionConfig,
+@@ -34,10 +38,23 @@
+      * @throws TransportException
+      * @throws InvalidArgumentException
+      */
+-    public function consume(string $queueName): iterable
++    public function consume(string $queueName, int|null $fetchSize = null): iterable
+     {
+         $queueConfig = $this->connectionConfig->getQueueConfig($queueName);
+ 
++        $desiredPrefetch = $fetchSize !== null && $fetchSize > $queueConfig->prefetchCount
++            ? $fetchSize
++            : $queueConfig->prefetchCount;
++
++        if ($this->effectivePrefetchCount !== $desiredPrefetch || $this->consumerTag === null) {
++            $this->connection->channel()->basic_qos(
++                prefetch_size: 0,
++                prefetch_count: $desiredPrefetch,
++                a_global: false,
++            );
++            $this->effectivePrefetchCount = $desiredPrefetch;
++        }
++
+         if ($this->consumerTag === null) {
+             $this->start($queueConfig);
+         }
+@@ -68,11 +85,25 @@
+                 break;
+             }
+ 
+-            $buffer = $this->buffer;
++            if ($fetchSize === null) {
++                // Keep original snapshotting into local variable (for legacy code support)!
++                // We do not use this approach when $fetchSize is used, because it will
++                // not yield all items in case the caller breks mid-iteration forced by the $fetchSize
++                $buffer = $this->buffer;
+ 
+-            $this->buffer = [];
++                $this->buffer = [];
+ 
+-            yield from $buffer;
++                yield from $buffer;
++            } else {
++                // Drain by shifting items off $this->buffer one-by-one rather than snapshotting it
++                // into a local and clearing the instance buffer up-front. If the caller breaks
++                // mid-iteration (e.g. AmqpReceiver honoring fetchSize), only the items already
++                // yielded are removed; the rest remain on $this->buffer and are picked up by the
++                // next consume() call instead of being silently dropped from PHP memory.
++                while (($amqpEnvelope = array_shift($this->buffer)) !== null) {
++                    yield $amqpEnvelope;
++                }
++            }
+ 
+             if ($stop) {
+                 break;
+@@ -95,7 +126,8 @@
+                 // do nothing
+             }
+ 
+-            $this->consumerTag = null;
++            $this->consumerTag            = null;
++            $this->effectivePrefetchCount = null;
+         }
+     }
+ 
+@@ -106,12 +138,6 @@
+      */
+     private function start(QueueConfig $queueConfig): void
+     {
+-        $this->connection->channel()->basic_qos(
+-            prefetch_size: 0,
+-            prefetch_count: $queueConfig->prefetchCount,
+-            a_global: false,
+-        );
+-
+         $this->consumerTag = $this->connection->channel()->basic_consume(
+             queue: $queueConfig->name,
+             consumer_tag: '',
+Index: src/Transport/AmqpReceiver.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/Transport/AmqpReceiver.php b/src/Transport/AmqpReceiver.php
+--- a/src/Transport/AmqpReceiver.php	(revision dbc2d7bf3ba94bafafd453d43c772aa806fcf9e2)
++++ b/src/Transport/AmqpReceiver.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -16,6 +16,8 @@
+ use Symfony\Component\Messenger\Transport\Serialization\SerializerInterface;
+ use Throwable;
+ 
++use function max;
++
+ class AmqpReceiver implements QueueReceiverInterface, MessageCountAwareInterface
+ {
+     public function __construct(
+@@ -30,8 +32,14 @@
+      * @psalm-suppress ImplementedReturnTypeMismatch
+      */
+     #[Override]
+-    public function get(): iterable
++    public function get(int|null $fetchSize = null): iterable
+     {
++        if ($fetchSize !== null) {
++            yield from $this->getFromQueues($this->connection->getQueueNames(), max(1, $fetchSize));
++
++            return;
++        }
++
+         yield from $this->getFromQueues($this->connection->getQueueNames());
+     }
+ 
+@@ -43,8 +51,24 @@
+      * @psalm-suppress ImplementedReturnTypeMismatch
+      */
+     #[Override]
+-    public function getFromQueues(array $queueNames): iterable
++    public function getFromQueues(array $queueNames, int|null $fetchSize = null): iterable
+     {
++        $remaining = $fetchSize !== null ? max(1, $fetchSize) : null;
++
++        if ($remaining !== null) {
++            foreach ($queueNames as $queueName) {
++                foreach ($this->getEnvelopes($queueName, $fetchSize) as $envelope) {
++                    yield $envelope;
++
++                    if (--$remaining <= 0) {
++                        return;
++                    }
++                }
++            }
++
++            return;
++        }
++
+         foreach ($queueNames as $queueName) {
+             yield from $this->getEnvelopes($queueName);
+         }
+@@ -92,9 +116,9 @@
+      * @throws TransportException
+      * @throws Throwable
+      */
+-    private function getEnvelopes(string $queueName): iterable
++    private function getEnvelopes(string $queueName, int|null $fetchSize = null): iterable
+     {
+-        $amqpEnvelopes = $this->connection->consume($queueName);
++        $amqpEnvelopes = $this->connection->consume($queueName, $fetchSize);
+ 
+         foreach ($amqpEnvelopes as $amqpEnvelope) {
+             $body = $amqpEnvelope->getBody();
+Index: src/Transport/AmqpTransport.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/Transport/AmqpTransport.php b/src/Transport/AmqpTransport.php
+--- a/src/Transport/AmqpTransport.php	(revision dbc2d7bf3ba94bafafd453d43c772aa806fcf9e2)
++++ b/src/Transport/AmqpTransport.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -38,8 +38,12 @@
+      * @psalm-suppress ImplementedReturnTypeMismatch
+      */
+     #[Override]
+-    public function get(): iterable
++    public function get(int|null $fetchSize = null): iterable
+     {
++        if ($fetchSize !== null) {
++            return $this->getReceiver()->get($fetchSize);
++        }
++
+         return $this->getReceiver()->get();
+     }
+ 
+@@ -51,8 +55,12 @@
+      * @psalm-suppress ImplementedReturnTypeMismatch
+      */
+     #[Override]
+-    public function getFromQueues(array $queueNames): iterable
++    public function getFromQueues(array $queueNames, int|null $fetchSize = null): iterable
+     {
++        if ($fetchSize !== null) {
++            return $this->getReceiver()->getFromQueues($queueNames, $fetchSize);
++        }
++
+         return $this->getReceiver()->getFromQueues($queueNames);
+     }
+ 
+Index: src/Transport/Connection.php
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/src/Transport/Connection.php b/src/Transport/Connection.php
+--- a/src/Transport/Connection.php	(revision dbc2d7bf3ba94bafafd453d43c772aa806fcf9e2)
++++ b/src/Transport/Connection.php	(revision a07c7fdaf8beef1c38c6dd66677b0c7548417a7f)
+@@ -134,13 +134,13 @@
+      * @throws TransportException
+      * @throws InvalidArgumentException
+      */
+-    public function consume(string $queueName): iterable
++    public function consume(string $queueName, int|null $fetchSize = null): iterable
+     {
+         if ($this->autoSetup) {
+             $this->setupExchangeAndQueues();
+         }
+ 
+-        return ($this->consumer ??= new AmqpConsumer($this, $this->connectionConfig, $this->logger))->consume($queueName);
++        return ($this->consumer ??= new AmqpConsumer($this, $this->connectionConfig, $this->logger))->consume($queueName, $fetchSize);
+     }
+ 
+     /**

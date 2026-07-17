@@ -6,6 +6,7 @@ namespace Kraz\MessengerWorkflow\Messenger\Middleware;
 
 use Doctrine\Persistence\ManagerRegistry;
 use Kraz\MessengerWorkflow\Application\Messenger\EventBusInterface;
+use Kraz\MessengerWorkflow\Domain\DomainEventInterface;
 use Kraz\MessengerWorkflow\Messenger\Stamp\SourceTransportNameStamp;
 use Kraz\MessengerWorkflow\Messenger\Stamp\StrictOrderStamp;
 use Kraz\MessengerWorkflow\Messenger\Stamp\TargetTransportNameStamp;
@@ -52,6 +53,8 @@ class EventMiddleware implements MiddlewareInterface
 
                 return $envelope->with(new HandledStamp(null, 'events'));
             }
+        } elseif (!$envelope->getMessage() instanceof DomainEventInterface) {
+            throw new \RuntimeException(\sprintf('Invalid event message. Expected an instance of "%s", but got %s', DomainEventInterface::class, \get_class($envelope->getMessage())));
         }
 
         return $stack->next()->handle($envelope, $stack);

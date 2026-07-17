@@ -30,7 +30,7 @@ class InboxMiddleware implements MiddlewareInterface
             $transportName = $envelope->last(TargetTransportNameStamp::class)?->getTransportName();
             if (!$transportName) {
                 $msg = $envelope->getMessage();
-                throw new \RuntimeException(\sprintf('Can not publish inbox event "%s". can not determine the transport name!', $msg::class));
+                throw new \RuntimeException(\sprintf('Can not publish the message "%s" to the inbox. The target transport name can not be determined!', $msg::class));
             }
             try {
                 $inboxEnvelope = TransferableStamps::extract($envelope);

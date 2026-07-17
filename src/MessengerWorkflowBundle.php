@@ -311,9 +311,8 @@ final class MessengerWorkflowBundle extends AbstractBundle
                 ->class(RedisResultStorage::class)
                 ->arg('$redis', service($messengerResultStorageProviderService ?? 'redis_client.default'));
         }
-        $services->set(ResultStorageInterface::class)
-            ->lazy();
         $services->alias('messenger_workflow.result_storage', 'messenger_workflow.result_storage.'.$messengerResultStorageProvider);
+        $services->alias(ResultStorageInterface::class, 'messenger_workflow.result_storage');
 
         // Console commands
         $services->set('messenger_workflow.console.supervisor_config')

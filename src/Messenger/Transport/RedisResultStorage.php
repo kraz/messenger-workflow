@@ -7,7 +7,6 @@ namespace Kraz\MessengerWorkflow\Messenger\Transport;
 use Kraz\MessengerWorkflow\Application\Exception\TaskFailedException;
 use Kraz\MessengerWorkflow\Messenger\Transport\Exception\ResultStorageWaitTimeoutException;
 use Symfony\Component\Messenger\Exception\TransportException;
-use Symfony\Component\Serializer\SerializerInterface;
 use Symfony\Component\VarExporter\DeepCloner;
 use Webmozart\Assert\Assert;
 
@@ -15,7 +14,6 @@ class RedisResultStorage implements ResultStorageInterface
 {
     public function __construct(
         protected \Redis $redis,
-        protected SerializerInterface $serializer,
         protected int $expireInputAfter = 3 * 60 * 60,
         protected int $expireOutputAfter = 60,
         protected ?string $namespace = null,
@@ -50,7 +48,7 @@ class RedisResultStorage implements ResultStorageInterface
     public function await(string $messageId, int $timeout): mixed
     {
         $key = $this->getStorageKey($messageId);
-        $startTime = time();
+        $deadline = microtime(true) + $timeout;
 
         do {
             try {
@@ -64,7 +62,7 @@ class RedisResultStorage implements ResultStorageInterface
             } catch (\RedisException $exception) {
                 throw new TransportException($exception->getMessage(), $exception->getCode());
             }
-        } while (time() - $startTime < $timeout);
+        } while (microtime(true) < $deadline);
 
         if (false === $payload) {
             throw new ResultStorageWaitTimeoutException('Waiting for result timeout');

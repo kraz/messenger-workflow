@@ -76,6 +76,7 @@ final class ConfigureTransportsPass implements CompilerPassInterface
                 return (string) match ($exchangeType) {
                     'topic' => RoutingKey::createForTopicTransport(($self ? 'internal.' : '').$value, $name, $self ? '#' : ''),
                     'direct' => RoutingKey::createForDirectTransport(($self ? 'internal.' : '').$value, $name),
+                    default => throw new \RuntimeException(\sprintf('Can not configure messenger transport "%s". The exchange type must be "direct" or "topic" to compute the binding keys of queue "%s", but "%s" is configured.', $name, $queueName, $exchangeType ?? 'null')),
                 };
             }, $bindingKeys));
             $options['queues'][$queueName]['binding_keys'] = $bindingKeys;

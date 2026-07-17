@@ -65,7 +65,7 @@ class QueryBus implements QueryBusInterface
             $envelope = $this->push($envelope);
             $messageIdStamp = $envelope->last(MessageIdStamp::class);
             if (!$messageIdStamp) {
-                throw new LogicException('Can find the message ID of the query request!');
+                throw new LogicException('Can not find the message ID of the query request!');
             }
 
             return $messageIdStamp->getMessageId();

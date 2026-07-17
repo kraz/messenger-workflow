@@ -9,6 +9,7 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\ORM\EntityManagerInterface;
 use Kraz\MessengerWorkflow\Messenger\Doctrine\Connection;
+use Kraz\MessengerWorkflow\Messenger\Doctrine\DbalConnectionComparator;
 use Kraz\MessengerWorkflow\Messenger\Doctrine\Transport\Outbox\OutboxTransport;
 use Kraz\MessengerWorkflow\Messenger\Transport\TransactionalTransportInterface;
 use Symfony\Component\Messenger\Envelope;
@@ -136,15 +137,7 @@ class InboxTransport implements TransportInterface, SetupableTransportInterface,
         if (!$provider instanceof DbalConnection) {
             return false;
         }
-        if ($provider === $this->connection->getDriverConnection()) {
-            return true;
-        }
-        $paramsA = $this->connection->getDriverConnection()->getParams();
-        $paramsB = $provider->getParams();
-        $base = array_intersect_key($paramsA, $paramsB);
-        $paramsA = array_intersect_key($paramsA, $base);
-        $paramsB = array_intersect_key($paramsB, $base);
 
-        return 0 === \count(array_diff_uassoc($paramsA, $paramsB, strcasecmp(...)));
+        return DbalConnectionComparator::isSameDatabase($this->connection->getDriverConnection(), $provider);
     }
 }

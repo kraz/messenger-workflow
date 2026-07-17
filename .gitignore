@@ -2,4 +2,5 @@
 *.sh
 .phpunit.cache
 composer.lock
+patches.lock.json
 vendor

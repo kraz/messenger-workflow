@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         displayDetailsOnTestsThatTriggerDeprecations="false"
+         displayDetailsOnTestsThatTriggerErrors="true"
+         displayDetailsOnTestsThatTriggerNotices="true"
+         displayDetailsOnTestsThatTriggerWarnings="true"
+         displayDetailsOnPhpunitDeprecations="true"
+>
+    <php>
+        <ini name="display_errors" value="1"/>
+        <ini name="error_reporting" value="-1"/>
+        <server name="APP_ENV" value="test" force="true"/>
+        <server name="APP_DEBUG" value="0" force="true"/>
+        <server name="KERNEL_CLASS" value="Kraz\MessengerWorkflow\Tests\TestKernel\TestKernel"/>
+        <server name="SHELL_VERBOSITY" value="-1"/>
+
+        <!-- Live infrastructure (defaults from README.md); override via real env vars -->
+        <env name="MWF_TEST_PG_HOST" value="127.0.0.1"/>
+        <env name="MWF_TEST_PG_PORT" value="5432"/>
+        <env name="MWF_TEST_PG_USER" value="test"/>
+        <env name="MWF_TEST_PG_PASSWORD" value="test"/>
+        <env name="MWF_TEST_PG_DBNAME" value="mwf_test"/>
+        <env name="MWF_TEST_REDIS_HOST" value="127.0.0.1"/>
+        <env name="MWF_TEST_REDIS_PORT" value="6379"/>
+        <env name="MWF_TEST_REDIS_AUTH" value="xxx"/>
+        <env name="MWF_TEST_AMQP_DSN" value="phpamqplib://guest:guest@127.0.0.1:5672"/>
+    </php>
+
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="functional">
+            <directory>tests/Functional</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+
+    <groups>
+        <exclude>
+            <!-- Spec-intent tests documenting known bugs (see TESTING_PLAN.md); run with -\-group known-issues -->
+            <group>known-issues</group>
+        </exclude>
+    </groups>
+
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

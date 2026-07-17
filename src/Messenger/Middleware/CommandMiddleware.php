@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kraz\MessengerWorkflow\Messenger\Middleware;
 
 use Doctrine\Persistence\ManagerRegistry;
+use Kraz\MessengerWorkflow\Application\CommandInterface;
 use Kraz\MessengerWorkflow\Messenger\Stamp\AsyncMessageStamp;
 use Kraz\MessengerWorkflow\Messenger\Stamp\AwaitMessageResultStamp;
 use Kraz\MessengerWorkflow\Messenger\Transport\ResultStorageInterface;
@@ -32,7 +33,13 @@ class CommandMiddleware implements MiddlewareInterface
     {
         if ($envelope->all(ReceivedStamp::class)) {
             return $this->handleTargetEvent($envelope, $stack, $this->receiverLocator, $this->managerRegistry, $this->queueOrmBinding);
-        } elseif (!$envelope->last(AsyncMessageStamp::class)) {
+        }
+
+        if (!$envelope->getMessage() instanceof CommandInterface) {
+            throw new \RuntimeException(\sprintf('Invalid command message. Expected an instance of "%s", but got %s', CommandInterface::class, \get_class($envelope->getMessage())));
+        }
+
+        if (!$envelope->last(AsyncMessageStamp::class)) {
             /** @var \Generator $handlers */
             $handlers = $this->handlersLocator->getHandlers($envelope);
             $handler = $handlers->current();
