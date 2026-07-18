@@ -14,7 +14,7 @@ readonly class RoutingKey implements \Stringable
         if (str_contains($key, '\\')) {
             $key = str_replace('\\', '.', $key);
             $isPublic = str_starts_with($key, 'Contracts.') || str_starts_with($key, '.Contracts.');
-            if (!$isPublic && !str_starts_with('App.', $key) && !str_starts_with('.App.', $key)) {
+            if (!$isPublic && !str_starts_with($key, 'App.') && !str_starts_with($key, '.App.')) {
                 $key = 'App.'.$key;
             }
             $routingKey = preg_match($pattern, $key, $matches) ? ($matches[1] ?? $key) : $key;

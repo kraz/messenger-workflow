@@ -6,6 +6,9 @@ namespace Kraz\MessengerWorkflow\Messenger\Doctrine\Handler;
 
 use Doctrine\ORM\EntityManagerInterface;
 use Kraz\MessengerWorkflow\Application\Messenger\HandlerTransactionInterface;
+use Kraz\MessengerWorkflow\Messenger\Doctrine\Connection;
+use Kraz\MessengerWorkflow\Messenger\Doctrine\DbalConnectionComparator;
+use Kraz\MessengerWorkflow\Messenger\Doctrine\Transport\Outbox\OutboxTransport;
 use Symfony\Component\Messenger\Exception\HandlerFailedException;
 use Symfony\Component\Messenger\Stamp\HandledStamp;
 
@@ -59,18 +62,16 @@ class DoctrineHandlerTransaction implements HandlerTransactionInterface
         if ($provider instanceof EntityManagerInterface) {
             $provider = $provider->getConnection();
         }
+        if ($provider instanceof OutboxTransport) {
+            $provider = $provider->getConnection();
+        }
+        if ($provider instanceof Connection) {
+            $provider = $provider->getDriverConnection();
+        }
         if (!$provider instanceof \Doctrine\DBAL\Connection) {
             return false;
         }
-        if ($provider === $this->entityManager->getConnection()) {
-            return true;
-        }
-        $paramsA = $this->entityManager->getConnection()->getParams();
-        $paramsB = $provider->getParams();
-        $base = array_intersect_key($paramsA, $paramsB);
-        $paramsA = array_intersect_key($paramsA, $base);
-        $paramsB = array_intersect_key($paramsB, $base);
 
-        return 0 === \count(array_diff_uassoc($paramsA, $paramsB, strcasecmp(...)));
+        return DbalConnectionComparator::isSameDatabase($this->entityManager->getConnection(), $provider);
     }
 }

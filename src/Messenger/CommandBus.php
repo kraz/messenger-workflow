@@ -65,7 +65,7 @@ class CommandBus implements CommandBusInterface
             $envelope = $this->push($envelope);
             $messageIdStamp = $envelope->last(MessageIdStamp::class);
             if (!$messageIdStamp) {
-                throw new LogicException('Can find the message ID of the command request!');
+                throw new LogicException('Can not find the message ID of the command request!');
             }
 
             return $messageIdStamp->getMessageId();

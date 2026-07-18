@@ -22,20 +22,23 @@
         "php": ">=8.4",
         "ext-redis": "*",
         "doctrine/orm": "^3.6",
+        "jwage/phpamqplib-messenger": "^0.10",
         "symfony/console": "^8.1",
         "symfony/doctrine-messenger": "^8.1",
         "symfony/messenger": "^8.1",
         "symfony/serializer": "^8.1",
         "symfony/uid": "^8.1",
+        "symfony/yaml": "^8.1",
         "webmozart/assert": "^2.4"
     },
     "require-dev": {
-        "doctrine/coding-standard": "^14.0",
-        "phpstan/phpstan": "^2.1",
-        "phpstan/phpstan-strict-rules": "^2.0",
+        "cweagans/composer-patches": "^2.0",
+        "doctrine/doctrine-bundle": "^3.2",
         "phpunit/phpunit": "^13.1",
         "symfony/framework-bundle": "^8.1",
-        "symfony/phpunit-bridge": "^8.1"
+        "symfony/phpunit-bridge": "^8.1",
+        "symfony/property-access": "^8.1",
+        "symfony/property-info": "^8.1"
     },
     "autoload": {
         "psr-4": {
@@ -44,14 +47,23 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "Kraz\\MessengerWorkflow\\Tests\\": "tests/"
+            "Kraz\\MessengerWorkflow\\Tests\\": "tests/",
+            "Contracts\\": "tests/Fixture/Contracts/"
         }
     },
     "config": {
         "sort-packages": true,
         "allow-plugins": {
-            "dealerdirect/phpcodesniffer-composer-installer": true
+            "dealerdirect/phpcodesniffer-composer-installer": true,
+            "cweagans/composer-patches": true
         }
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "extra": {
+        "patches": {
+            "jwage/phpamqplib-messenger": {
+                "Add support for Symfony 8.1": "patches/composer/jwage/phpamqplib-messenger/patch-121"
+            }
+        }
+    }
 }

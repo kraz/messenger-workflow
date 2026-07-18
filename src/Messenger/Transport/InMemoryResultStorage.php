@@ -27,6 +27,11 @@ class InMemoryResultStorage implements ResultStorageInterface, ResetInterface
         ]));
     }
 
+    /**
+     * The in-memory storage is single-process: no other process can write a result while
+     * this call is blocked, so the timeout is not waited for — a missing result throws
+     * immediately. Use the redis provider when results are produced by remote workers.
+     */
     public function await(string $messageId, int $timeout): mixed
     {
         if (!\array_key_exists($messageId, $this->data)) {

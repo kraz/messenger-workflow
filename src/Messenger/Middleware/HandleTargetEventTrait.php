@@ -107,7 +107,7 @@ trait HandleTargetEventTrait
             if ($useResultStorage) {
                 $notifierTransportName = $targetTransportName.'_notifier';
                 if (!$receiverLocator->has($notifierTransportName)) {
-                    throw new UnrecoverableMessageHandlingException(\sprintf('Can not handle the message. The notifier messenger transport "%s" for handler messenger transport "%s" was not found.', $targetTransportName, $notifierTransportName));
+                    throw new UnrecoverableMessageHandlingException(\sprintf('Can not handle the message. The notifier messenger transport "%s" for handler messenger transport "%s" was not found.', $notifierTransportName, $targetTransportName));
                 }
                 $notifierTransport = $receiverLocator->get($notifierTransportName);
                 if (!$notifierTransport instanceof OutboxTransport) {
