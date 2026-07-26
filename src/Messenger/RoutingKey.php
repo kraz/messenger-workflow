@@ -15,6 +15,8 @@ readonly class RoutingKey implements \Stringable
             $key = str_replace('\\', '.', $key);
             $isPublic = str_starts_with($key, 'Contracts.') || str_starts_with($key, '.Contracts.');
             if (!$isPublic && !str_starts_with($key, 'App.') && !str_starts_with($key, '.App.')) {
+                // The `App` prefix will be stripped by the preg_match below when using the `createForDirectTransport` or `createForTopicTransport`,
+                // but it's required in order to extract the right context for the
                 $key = 'App.'.$key;
             }
             $routingKey = preg_match($pattern, $key, $matches) ? ($matches[1] ?? $key) : $key;

@@ -66,6 +66,9 @@ final class ConfigureTransportsPass implements CompilerPassInterface
                 throw new \RuntimeException(\sprintf('Can not configure messenger transport "%s". The owner of queue "%s" is not set!', $name, $queueName));
             }
             $bindingKeys = $queueBinding['binding_keys'] ?? [];
+            if ($multicast) {
+                $bindingKeys = array_merge($bindingKeys, $this->findHandledMessageClasses($container, $queueName));
+            }
             array_unshift($bindingKeys, $owner);
             if (!$multicast) {
                 array_unshift($bindingKeys, $name.'.'.$owner);
@@ -79,10 +82,65 @@ final class ConfigureTransportsPass implements CompilerPassInterface
                     default => throw new \RuntimeException(\sprintf('Can not configure messenger transport "%s". The exchange type must be "direct" or "topic" to compute the binding keys of queue "%s", but "%s" is configured.', $name, $queueName, $exchangeType ?? 'null')),
                 };
             }, $bindingKeys));
-            $options['queues'][$queueName]['binding_keys'] = $bindingKeys;
+            $options['queues'][$queueName]['binding_keys'] = $this->removeBindingKeysCoveredByWildcard($bindingKeys);
         }
         $definitionArgs[1] = $options;
         $definition->setArguments($definitionArgs);
+    }
+
+    /**
+     * Collects the message classes handled by every messenger handler bound to the given
+     * transport, so their binding keys can be registered without explicit configuration.
+     *
+     * @return list<class-string>
+     */
+    private function findHandledMessageClasses(ContainerBuilder $container, string $transportName): array
+    {
+        $classes = [];
+        foreach ($container->findTaggedServiceIds('messenger.message_handler', true) as $serviceId => $tags) {
+            foreach ($tags as $tag) {
+                if (($tag['from_transport'] ?? null) !== $transportName) {
+                    continue;
+                }
+                if (!empty($tag['handles'])) {
+                    $classes[] = $tag['handles'];
+                    continue;
+                }
+                $handlerClass = $container->getParameterBag()->resolveValue($container->getDefinition($serviceId)->getClass());
+                $reflection = \is_string($handlerClass) && $handlerClass ? $container->getReflectionClass($handlerClass, false) : null;
+                $method = $tag['method'] ?? '__invoke';
+                if (!$reflection || !$reflection->hasMethod($method)) {
+                    continue;
+                }
+                $type = ($reflection->getMethod($method)->getParameters()[0] ?? null)?->getType();
+                $types = $type instanceof \ReflectionUnionType ? $type->getTypes() : [$type];
+                foreach ($types as $parameterType) {
+                    if ($parameterType instanceof \ReflectionNamedType && !$parameterType->isBuiltin()) {
+                        $classes[] = $parameterType->getName();
+                    }
+                }
+            }
+        }
+
+        return array_values(array_unique($classes));
+    }
+
+    /**
+     * @param string[] $bindingKeys
+     *
+     * @return list<string>
+     */
+    private function removeBindingKeysCoveredByWildcard(array $bindingKeys): array
+    {
+        return array_values(array_filter($bindingKeys, static function (string $key) use ($bindingKeys): bool {
+            foreach ($bindingKeys as $other) {
+                if ($other !== $key && str_ends_with($other, '.#') && str_starts_with($key, substr($other, 0, -1))) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
     }
 
     /**

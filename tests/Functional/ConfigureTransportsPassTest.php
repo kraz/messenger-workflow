@@ -8,6 +8,8 @@ use Jwage\PhpAmqpLibMessengerBundle\Transport\AmqpTransportFactory as JwageAmqpT
 use Jwage\PhpAmqpLibMessengerBundle\Transport\ConnectionFactory;
 use Kraz\MessengerWorkflow\DependencyInjection\Compiler\ConfigureTransportsPass;
 use Kraz\MessengerWorkflow\Messenger\Amqp\AmqpTransportFactory;
+use Kraz\MessengerWorkflow\Tests\Fixture\Handler\ContractEventFromTransportHandler;
+use Kraz\MessengerWorkflow\Tests\Fixture\Handler\FromTransportEventHandler;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\Argument\IteratorArgument;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -17,6 +19,8 @@ use Symfony\Component\DependencyInjection\Reference;
 /**
  * Spec: RabbitMQ integration — the bundle swaps in its own AMQP transport factory and
  * computes queue binding keys (direct exchange for commands, topic exchange for events).
+ * Event binding keys are also derived automatically from the message classes handled by
+ * the messenger handlers bound to a queue's transport (from_transport).
  */
 final class ConfigureTransportsPassTest extends TestCase
 {
@@ -103,6 +107,174 @@ final class ConfigureTransportsPassTest extends TestCase
                 'commands.internal.TestApp',
             ],
             array_values($options['queues']['app_commands']['binding_keys']),
+        );
+    }
+
+    private function registerMessageHandler(ContainerBuilder $container, string $class, array $tagAttributes, string $serviceId = ''): void
+    {
+        $definition = new Definition($class);
+        $definition->addTag('messenger.message_handler', $tagAttributes);
+        $container->setDefinition($serviceId ?: $class, $definition);
+    }
+
+    public function testEventHandlerBindingKeysAreAddedAutomatically(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    'app_events' => ['owner' => 'TestApp'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, ContractEventFromTransportHandler::class, ['bus' => 'event.bus', 'from_transport' => 'app_events']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(
+            [
+                'events.internal.TestApp.#',
+                'events.Demo.Event.SomethingHappened',
+            ],
+            $options['queues']['app_events']['binding_keys'],
+        );
+    }
+
+    public function testAutomaticBindingKeysDoNotDuplicateConfiguredOnes(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    'app_events' => [
+                        'owner' => 'TestApp',
+                        'binding_keys' => ['Contracts\Demo\Event\SomethingHappened'],
+                    ],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, ContractEventFromTransportHandler::class, ['bus' => 'event.bus', 'from_transport' => 'app_events']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(
+            [
+                'events.internal.TestApp.#',
+                'events.Demo.Event.SomethingHappened',
+            ],
+            $options['queues']['app_events']['binding_keys'],
+        );
+    }
+
+    public function testHandledClassIsResolvedFromTheTaggedMethod(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    'app_events' => ['owner' => 'TestApp'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, FromTransportEventHandler::class, ['bus' => 'event.bus', 'from_transport' => 'app_events', 'method' => 'onEvent']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(
+            [
+                'events.internal.TestApp.#',
+                'events.internal.Kraz.MessengerWorkflow.Tests.Fixture.Message.TransportScopedEvent',
+            ],
+            $options['queues']['app_events']['binding_keys'],
+        );
+    }
+
+    public function testHandlesTagAttributeTakesPrecedenceOverReflection(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    'app_events' => ['owner' => 'TestApp'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, \stdClass::class, ['bus' => 'event.bus', 'from_transport' => 'app_events', 'handles' => 'Contracts\Demo\Event\SomethingHappened'], 'app.some_handler');
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(
+            [
+                'events.internal.TestApp.#',
+                'events.Demo.Event.SomethingHappened',
+            ],
+            $options['queues']['app_events']['binding_keys'],
+        );
+    }
+
+    public function testOwnContextEventsAreAlreadyCoveredByTheOwnerWildcard(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    // The fixture event lives under the "Kraz" root namespace, so its routing
+                    // key falls under this owner's internal wildcard and needs no own binding.
+                    'app_events' => ['owner' => 'Kraz'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, FromTransportEventHandler::class, ['bus' => 'event.bus', 'from_transport' => 'app_events', 'method' => 'onEvent']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(['events.internal.Kraz.#'], $options['queues']['app_events']['binding_keys']);
+    }
+
+    public function testHandlersBoundToOtherTransportsAreIgnored(): void
+    {
+        $container = $this->buildContainer([
+            'events' => [
+                'queue_bindings' => [
+                    'app_events' => ['owner' => 'TestApp'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, ContractEventFromTransportHandler::class, ['bus' => 'event.bus', 'from_transport' => 'other_events']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.events')->getArgument(1);
+
+        self::assertSame(['events.internal.TestApp.#'], $options['queues']['app_events']['binding_keys']);
+    }
+
+    public function testCommandTransportsDoNotGetAutomaticBindingKeys(): void
+    {
+        $container = $this->buildContainer([
+            'commands' => [
+                'queue_bindings' => [
+                    'app_commands' => ['owner' => 'TestApp'],
+                ],
+            ],
+        ]);
+        $this->registerMessageHandler($container, ContractEventFromTransportHandler::class, ['bus' => 'command.bus', 'from_transport' => 'app_commands']);
+
+        (new ConfigureTransportsPass())->process($container);
+
+        $options = $container->getDefinition('messenger.transport.commands')->getArgument(1);
+
+        self::assertSame(
+            [
+                'commands.TestApp',
+                'commands.internal.TestApp',
+            ],
+            $options['queues']['app_commands']['binding_keys'],
         );
     }
 
