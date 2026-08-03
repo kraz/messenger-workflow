@@ -12,10 +12,11 @@ use Kraz\MessengerWorkflow\Messenger\EventBus;
 use Kraz\MessengerWorkflow\Messenger\QueryBus;
 use Kraz\MessengerWorkflow\Messenger\Transport\InMemoryResultStorage;
 use Kraz\MessengerWorkflow\Tests\Fixture\BusAccessor;
-use PHPUnit\Framework\TestCase;
-use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Kraz\MessengerWorkflow\Tests\Support\WorkflowKernelTestCase;
+use Symfony\Bundle\FrameworkBundle\Console\Application;
+use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Retry\MultiplierRetryStrategy;
 use Symfony\Component\Messenger\Transport\TransportInterface;
 
 /**
@@ -71,6 +72,35 @@ final class BundleWiringTest extends WorkflowKernelTestCase
         self::assertInstanceOf(AmqpTransport::class, $container->get('messenger.transport.commands'));
         self::assertInstanceOf(AmqpTransport::class, $container->get('messenger.transport.queries'));
         self::assertInstanceOf(AmqpTransport::class, $container->get('messenger.transport.events'));
+    }
+
+    public function testCommandInboxTransportDefaultsToNoRetries(): void
+    {
+        // Commands must fail immediately (routed to their failure transport) instead of lingering
+        // in the inbox for a delayed redelivery; recoverable failures still retry via Symfony's
+        // retry listener which handles them before the strategy is consulted.
+        $strategy = self::getContainer()->get('messenger.retry_strategy_locator')->get('app_commands');
+
+        self::assertInstanceOf(MultiplierRetryStrategy::class, $strategy);
+        self::assertFalse($strategy->isRetryable(new Envelope(new \stdClass())));
+    }
+
+    public function testCommandInboxRetryDefaultIsOverridableFromAppConfig(): void
+    {
+        // The "no retries" default is prepended, so an application can still opt into retries.
+        $strategy = self::getContainer()->get('messenger.retry_strategy_locator')->get('app_commands_with_retries');
+
+        self::assertInstanceOf(MultiplierRetryStrategy::class, $strategy);
+        self::assertTrue($strategy->isRetryable(new Envelope(new \stdClass())));
+    }
+
+    public function testEventInboxTransportKeepsRetrying(): void
+    {
+        // Events rely on retries for at-least-once delivery, so they keep the default strategy.
+        $strategy = self::getContainer()->get('messenger.retry_strategy_locator')->get('app_events');
+
+        self::assertInstanceOf(MultiplierRetryStrategy::class, $strategy);
+        self::assertTrue($strategy->isRetryable(new Envelope(new \stdClass())));
     }
 
     public function testSupervisorConfigCommandIsRegistered(): void

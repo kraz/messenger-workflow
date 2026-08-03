@@ -73,7 +73,7 @@ final class ConfigureTransportsPass implements CompilerPassInterface
             if (!$multicast) {
                 array_unshift($bindingKeys, $name.'.'.$owner);
             }
-            $bindingKeys = array_unique(array_map(function (string $value) use ($owner, $name, $exchangeType) {
+            $bindingKeys = array_unique(array_map(function (string $value) use ($owner, $name, $exchangeType, $queueName) {
                 $self = $owner === $value;
 
                 return (string) match ($exchangeType) {

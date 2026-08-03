@@ -193,6 +193,29 @@ final class MessengerWorkflowBundle extends AbstractBundle
     public function prependExtension(ContainerConfigurator $container, ContainerBuilder $builder): void
     {
         $container->import('../config/packages/*.{php,yaml}');
+
+        // Commands are RPC-style: a failing handler must surface immediately and land in the
+        // failure transport instead of lingering in the inbox for a delayed redelivery. So the
+        // bundle defaults every command inbox transport to "no retries". Because this is prepended,
+        // it is merged with the lowest priority and an application can still override the retry
+        // strategy (max_retries, delay, service, ...) from its own transport configuration.
+        // Recoverable failures keep retrying regardless: Symfony's retry listener handles
+        // RecoverableMessageHandlingException before ever consulting the retry strategy.
+        $commandInboxTransports = [];
+        foreach ($builder->getExtensionConfig('framework') as $frameworkConfig) {
+            foreach ($frameworkConfig['messenger']['transports'] ?? [] as $name => $transport) {
+                $dsn = \is_string($transport) ? $transport : ($transport['dsn'] ?? null);
+                if (\is_string($dsn) && str_starts_with($dsn, 'commands-inbox://')) {
+                    $commandInboxTransports[$name] = ['retry_strategy' => ['max_retries' => 0]];
+                }
+            }
+        }
+
+        if ($commandInboxTransports) {
+            $builder->prependExtensionConfig('framework', [
+                'messenger' => ['transports' => $commandInboxTransports],
+            ]);
+        }
     }
 
     #[\Override]

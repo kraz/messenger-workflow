@@ -104,6 +104,12 @@ class TestKernel extends Kernel
                 'failure_transport' => 'app_commands_failures',
             ],
             'app_commands_failures' => 'commands-failures://app?queue_name=app_commands',
+            // A command inbox that overrides the bundle's "no retries" default from app config.
+            'app_commands_with_retries' => [
+                'dsn' => 'commands-inbox://app?auto_setup=true',
+                'failure_transport' => 'app_commands_failures',
+                'retry_strategy' => ['max_retries' => 3],
+            ],
             'app_commands_notifier' => 'commands-outbox://app?auto_setup=true',
             'app_outbox' => 'events-outbox://app?auto_setup=true',
             'app_events' => [
