@@ -4,3 +4,4 @@
 composer.lock
 patches.lock.json
 vendor
+config/reference.php

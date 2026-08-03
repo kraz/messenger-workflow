@@ -21,6 +21,8 @@ final class ConfigureTransportsPass implements CompilerPassInterface
 
     private function configureMessenger(ContainerBuilder $container): void
     {
+        $this->configureCommandInboxRetries($container);
+
         $baseAmqpTransportFactoryId = \Jwage\PhpAmqpLibMessengerBundle\Transport\AmqpTransportFactory::class;
         if ($container->hasDefinition($baseAmqpTransportFactoryId)) {
             $amqpConnectionFactory = $container->getDefinition($baseAmqpTransportFactoryId)
@@ -44,6 +46,52 @@ final class ConfigureTransportsPass implements CompilerPassInterface
                 $this->removeMessageBusMiddleware($container->getDefinition($busName), [
                     'messenger.middleware.reject_redelivered_message_middleware',
                 ]);
+            }
+        }
+    }
+
+    /**
+     * Commands are RPC-style: a failing handler must surface immediately and land in its failure
+     * transport instead of lingering in the inbox for a delayed redelivery. So every command inbox
+     * transport defaults to "no retries" (max_retries = 0).
+     *
+     * This runs as a compiler pass rather than from the bundle's prependExtension() on purpose:
+     * application modules routinely declare their command inbox transports from their own
+     * prependExtension(), which executes after this bundle's prepend (the bundle is registered
+     * before those modules). A prepend-time scan of the framework config would therefore miss those
+     * transports entirely and never apply the default. By compile time every extension has
+     * contributed its configuration, so all command inbox transports are visible here.
+     *
+     * The default stays overridable: an application that explicitly sets "retry_strategy.max_retries"
+     * (or a custom "retry_strategy.service", in which case no multiplier strategy service exists)
+     * for the transport keeps its own value. Recoverable failures keep retrying regardless, because
+     * Symfony's retry listener handles RecoverableMessageHandlingException before ever consulting
+     * the retry strategy.
+     */
+    private function configureCommandInboxRetries(ContainerBuilder $container): void
+    {
+        $commandInboxTransports = [];
+        $explicitMaxRetries = [];
+        foreach ($container->getExtensionConfig('framework') as $frameworkConfig) {
+            foreach ($frameworkConfig['messenger']['transports'] ?? [] as $name => $transport) {
+                $dsn = \is_string($transport) ? $transport : ($transport['dsn'] ?? null);
+                if (\is_string($dsn) && str_starts_with($dsn, 'commands-inbox://')) {
+                    $commandInboxTransports[$name] = true;
+                }
+                $retryStrategy = \is_array($transport) ? ($transport['retry_strategy'] ?? []) : [];
+                if (\is_array($retryStrategy) && \array_key_exists('max_retries', $retryStrategy)) {
+                    $explicitMaxRetries[$name] = true;
+                }
+            }
+        }
+
+        foreach (array_keys($commandInboxTransports) as $name) {
+            if (isset($explicitMaxRetries[$name])) {
+                continue;
+            }
+            $retryServiceId = 'messenger.retry.multiplier_retry_strategy.'.$name;
+            if ($container->hasDefinition($retryServiceId)) {
+                $container->getDefinition($retryServiceId)->replaceArgument(0, 0);
             }
         }
     }

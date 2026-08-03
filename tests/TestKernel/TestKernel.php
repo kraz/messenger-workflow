@@ -23,6 +23,10 @@ class TestKernel extends Kernel
         yield new DoctrineBundle();
         yield new PhpAmqpLibMessengerBundle();
         yield new MessengerWorkflowBundle();
+        // Registered after the bundle on purpose: it declares a command inbox transport from its
+        // own prependExtension(), reproducing an application module whose transports are only known
+        // after the bundle's own prepend has run.
+        yield new \Kraz\MessengerWorkflow\Tests\Fixture\LateModuleBundle();
     }
 
     public function getProjectDir(): string

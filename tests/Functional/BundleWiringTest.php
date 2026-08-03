@@ -85,9 +85,21 @@ final class BundleWiringTest extends WorkflowKernelTestCase
         self::assertFalse($strategy->isRetryable(new Envelope(new \stdClass())));
     }
 
+    public function testCommandInboxTransportFromLaterRegisteredBundleDefaultsToNoRetries(): void
+    {
+        // Regression: application modules declare their command inbox transports from their own
+        // prependExtension(), which runs after the bundle's prepend. The "no retries" default is
+        // applied at compile time precisely so those late transports are still covered.
+        $strategy = self::getContainer()->get('messenger.retry_strategy_locator')->get('late_module_commands');
+
+        self::assertInstanceOf(MultiplierRetryStrategy::class, $strategy);
+        self::assertFalse($strategy->isRetryable(new Envelope(new \stdClass())));
+    }
+
     public function testCommandInboxRetryDefaultIsOverridableFromAppConfig(): void
     {
-        // The "no retries" default is prepended, so an application can still opt into retries.
+        // The "no retries" default only applies when the app did not set max_retries itself, so an
+        // application can still opt into retries for a command inbox transport.
         $strategy = self::getContainer()->get('messenger.retry_strategy_locator')->get('app_commands_with_retries');
 
         self::assertInstanceOf(MultiplierRetryStrategy::class, $strategy);
