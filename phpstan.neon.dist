@@ -1,0 +1,33 @@
+includes:
+    - vendor/phpstan/phpstan-strict-rules/rules.neon
+
+parameters:
+    level: max
+    tmpDir: .phpstan.cache
+    paths:
+        - src
+        - tests
+    bootstrapFiles:
+        - tests/bootstrap.php
+    ignoreErrors:
+        # The API-shape test deliberately asserts facts that are statically true today —
+        # it exists to fail when a future change makes them false.
+        -
+            identifiers:
+                - function.alreadyNarrowedType
+                - staticMethod.alreadyNarrowedType
+            path: tests/Unit/Application/PublicApiShapeTest.php
+        # The jwage bundle's BundleBase is declared conditionally (Symfony-version compat
+        # shim), so PHPStan cannot resolve its hierarchy down to BundleInterface.
+        -
+            message: '#Jwage\\PhpAmqpLibMessengerBundle\\PhpAmqpLibMessengerBundle given#'
+            identifier: generator.valueType
+            paths:
+                - tests/TestKernel/TestKernel.php
+                - tests/TestKernel/ReducedFlowKernel.php
+                - tests/TestKernel/BookAppDemo1BcKernel.php
+                - tests/TestKernel/ChaosKernel.php
+        # App\ModuleX\SampleCommand is eval()-declared inside the regression test.
+        -
+            message: '#App\\ModuleX\\SampleCommand#'
+            path: tests/Unit/Infrastructure/Messenger/RoutingKeyTest.php

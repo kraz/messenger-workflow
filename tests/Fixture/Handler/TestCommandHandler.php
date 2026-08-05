@@ -9,17 +9,16 @@ use Kraz\MessengerWorkflow\Tests\Fixture\Message\TestCommand;
 use Kraz\MessengerWorkflow\Tests\Fixture\MessageRecorder;
 
 #[AsCommandHandler]
-final readonly class TestCommandHandler
+final class TestCommandHandler
 {
-    public function __construct(
-        private MessageRecorder $recorder,
-    ) {
+    public function __construct(private readonly MessageRecorder $recorder)
+    {
     }
 
     public function __invoke(TestCommand $command): string
     {
-        $this->recorder->record($command);
+        $this->recorder->record(self::class, $command);
 
-        return 'handled:'.$command->payload;
+        return 'command-result:'.$command->payload;
     }
 }

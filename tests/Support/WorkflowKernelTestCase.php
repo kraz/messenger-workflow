@@ -12,14 +12,16 @@ abstract class WorkflowKernelTestCase extends KernelTestCase
     {
         parent::tearDown();
 
-        // FrameworkBundle registers an exception handler on kernel boot and never removes it,
-        // which PHPUnit >= 11 reports as risky. Pop any handlers left behind.
+        // The kernel/framework may leave exception handlers registered which PHPUnit >= 11
+        // reports as risky tests. Pop any leftover handlers.
         while (true) {
             $previousHandler = set_exception_handler(static fn () => null);
             restore_exception_handler();
+
             if (null === $previousHandler) {
                 break;
             }
+
             restore_exception_handler();
         }
     }

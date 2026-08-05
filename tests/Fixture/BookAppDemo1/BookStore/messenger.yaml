@@ -1,0 +1,71 @@
+framework:
+    messenger:
+        transports:
+            # Commands
+            book_store_commands:
+                dsn: 'commands-inbox://book_store'
+                failure_transport: book_store_commands_failures
+            book_store_commands_failures: 'commands-failures://book_store?queue_name=book_store_events'
+            book_store_commands_notifier: 'commands-outbox://book_store'
+            
+            # Events
+            book_store_outbox: 'events-outbox://book_store'
+            book_store_events:
+                dsn: 'events-inbox://book_store'
+                failure_transport: book_store_events_failures
+            book_store_events_failures: 'events-failures://book_store?queue_name=book_store_events'
+
+messenger_workflow:
+    messenger:
+        transports:
+            events:
+                queue_bindings:
+                    - queue: book_store_events
+                      owner: BookStore
+            commands:
+                queue_bindings:
+                    - queue: book_store_commands
+                      owner: BookStore
+            queries:
+                queue_bindings:
+                    - queue: book_store_queries
+                      owner: BookStore
+        workflow:
+            workers:
+                # Events
+                - name: Book store events publisher
+                  group: Book store
+                  type: event_publisher
+                  source: book_store_outbox
+
+                - name: Book store events receiver
+                  group: Book store
+                  type: event_receiver
+                  queue: book_store_events
+
+                - name: Book store events handler
+                  group: Book store
+                  type: event_handler
+                  source: book_store_events
+                
+                # Commands
+                - name: Book store commands receiver
+                  group: Book store
+                  type: command_receiver
+                  queue: book_store_commands
+
+                - name: Book store commands handler
+                  group: Book store
+                  type: command_handler
+                  source: book_store_commands
+
+                - name: Book store commands notifier
+                  group: Book store
+                  type: command_notifier
+                  source: book_store_commands_notifier
+                
+                # Queries
+                - name: Book store queries handler
+                  group: Book store
+                  type: query_handler
+                  queue: book_store_queries

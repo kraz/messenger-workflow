@@ -8,8 +8,7 @@ use Kraz\MessengerWorkflow\Application\CommandInterface;
 
 final class TestCommand implements CommandInterface
 {
-    public function __construct(
-        public string $payload = 'payload',
-    ) {
+    public function __construct(public readonly string $payload = 'test')
+    {
     }
 }

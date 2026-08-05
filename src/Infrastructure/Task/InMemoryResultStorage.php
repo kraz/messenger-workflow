@@ -1,0 +1,62 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Kraz\MessengerWorkflow\Infrastructure\Task;
+
+use Kraz\MessengerWorkflow\Application\Task\Exception\ResultStorageWaitTimeoutException;
+use Kraz\MessengerWorkflow\Application\Task\ResultStorageInterface;
+use Kraz\MessengerWorkflow\Application\Task\ResultStoragePayload;
+use Symfony\Contracts\Service\ResetInterface;
+
+class InMemoryResultStorage implements ResultStorageInterface, ResetInterface
+{
+    /**
+     * @var array<string, mixed>
+     */
+    private array $data = [];
+
+    public function write(string $messageId, mixed $data): void
+    {
+        $this->data[$messageId] = $data;
+    }
+
+    public function writeError(string $messageId, string $message, int|string|null $code = null, ?string $class = null, ?string $trace = null): void
+    {
+        $this->write($messageId, new ResultStoragePayload(null, [
+            'message' => $message,
+            'code' => $code,
+            'class' => $class,
+            'trace' => $trace,
+        ]));
+    }
+
+    /**
+     * The in-memory storage is single-process: no other process can write a result while
+     * this call is blocked, so the timeout is not waited for — a missing result throws
+     * immediately. Use the redis provider when results are produced by remote workers.
+     */
+    public function await(string $messageId, int $timeout): mixed
+    {
+        if (!\array_key_exists($messageId, $this->data)) {
+            throw new ResultStorageWaitTimeoutException('Waiting for result timeout');
+        }
+
+        $result = $this->data[$messageId];
+
+        if (!$result instanceof ResultStoragePayload) {
+            return $result;
+        }
+
+        if ($result->isError()) {
+            throw $result->createFailure();
+        }
+
+        return $result->getValue();
+    }
+
+    public function reset(): void
+    {
+        $this->data = [];
+    }
+}

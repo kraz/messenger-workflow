@@ -11,14 +11,15 @@ use Kraz\MessengerWorkflow\Tests\Fixture\Message\TestQuery;
 use Kraz\MessengerWorkflow\Tests\Fixture\Message\TransportScopedEvent;
 use Kraz\MessengerWorkflow\Tests\Fixture\Message\UnhandledEvent;
 use Kraz\MessengerWorkflow\Tests\Support\WorkflowKernelTestCase;
+use Kraz\MessengerWorkflow\Tests\TestKernel\InvalidMethodHandlerKernel;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Handler\HandlersLocatorInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 
 /**
- * Spec: message type enforcement — commands/queries exactly one handler, events zero or more.
- * The #[AsCommandHandler]/#[AsQueryHandler]/#[AsEventHandler] attributes must register
- * handlers on their respective bus only.
+ * Spec: message type enforcement — commands/queries exactly one handler, events zero or
+ * more. The #[AsCommandHandler]/#[AsQueryHandler]/#[AsEventHandler] attributes must
+ * register handlers on their respective bus only.
  */
 final class HandlerAttributeAutoconfigurationTest extends WorkflowKernelTestCase
 {
@@ -42,18 +43,18 @@ final class HandlerAttributeAutoconfigurationTest extends WorkflowKernelTestCase
     {
         self::assertSame(1, $this->handlerCount('query.bus', new TestQuery()));
         self::assertSame(0, $this->handlerCount('command.bus', new TestQuery()));
+        self::assertSame(0, $this->handlerCount('event.bus', new TestQuery()));
     }
 
-    public function testEventsSupportMultipleHandlers(): void
+    public function testEventsSupportMultipleMethodLevelHandlers(): void
     {
-        // Spec: "Events can have zero or more handlers"
         self::assertSame(2, $this->handlerCount('event.bus', new TestEvent()));
         self::assertSame(0, $this->handlerCount('event.bus', new UnhandledEvent()));
     }
 
     public function testMethodLevelAttributesRegisterEachMethodAsHandler(): void
     {
-        // DuplicatedQueryHandlers declares two #[AsQueryHandler] methods for the same query
+        // DuplicatedQueryHandlers declares two #[AsQueryHandler] methods for the same query.
         self::assertSame(2, $this->handlerCount('query.bus', new DuplicatedQuery()));
     }
 
@@ -61,5 +62,22 @@ final class HandlerAttributeAutoconfigurationTest extends WorkflowKernelTestCase
     {
         self::assertSame(1, $this->handlerCount('event.bus', new TransportScopedEvent(), 'app_events'));
         self::assertSame(0, $this->handlerCount('event.bus', new TransportScopedEvent(), 'another_transport'));
+        // Symfony semantics: from_transport only filters received messages — an envelope
+        // without a ReceivedStamp (not yet sent through a transport) matches all handlers.
+        self::assertSame(1, $this->handlerCount('event.bus', new TransportScopedEvent()));
+    }
+
+    public function testMethodLevelAttributeDeclaringAMethodFailsCompilation(): void
+    {
+        $kernel = new InvalidMethodHandlerKernel('test', false);
+
+        try {
+            $this->expectException(\LogicException::class);
+            $this->expectExceptionMessageMatches('/cannot declare a method on/');
+
+            $kernel->boot();
+        } finally {
+            $kernel->shutdown();
+        }
     }
 }

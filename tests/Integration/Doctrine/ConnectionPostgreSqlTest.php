@@ -5,15 +5,16 @@ declare(strict_types=1);
 namespace Kraz\MessengerWorkflow\Tests\Integration\Doctrine;
 
 use Doctrine\DBAL\Connection as DBALConnection;
-use Doctrine\DBAL\DriverManager;
-use Kraz\MessengerWorkflow\Messenger\Doctrine\Connection;
-use Kraz\MessengerWorkflow\Messenger\Doctrine\PostgreSqlConnection;
+use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Connection;
+use Kraz\MessengerWorkflow\Infrastructure\Doctrine\PostgreSqlConnection;
+use Kraz\MessengerWorkflow\Tests\Support\PostgresDbal;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
+use Symfony\Component\Messenger\Exception\TransportException;
 
 /**
- * Spec: PostgreSQL 18 infrastructure; LISTEN/NOTIFY push, SKIP LOCKED multi-consumer
- * fetching and redelivery of stuck messages.
+ * Spec: PostgreSQL infrastructure; LISTEN/NOTIFY push, SKIP LOCKED multi-consumer
+ * fetching and redelivery of stuck messages. Ported from the original package.
  */
 #[Group('postgres')]
 #[RequiresPhpExtension('pdo_pgsql')]
@@ -24,14 +25,13 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
 
     protected function createDbalConnection(): DBALConnection
     {
-        $connection = DriverManager::getConnection([
-            'driver' => 'pdo_pgsql',
-            'host' => $_ENV['MWF_TEST_PG_HOST'] ?? '127.0.0.1',
-            'port' => (int) ($_ENV['MWF_TEST_PG_PORT'] ?? 5432),
-            'user' => $_ENV['MWF_TEST_PG_USER'] ?? 'test',
-            'password' => $_ENV['MWF_TEST_PG_PASSWORD'] ?? 'test',
-            'dbname' => $_ENV['MWF_TEST_PG_DBNAME'] ?? 'mwf_test',
-        ]);
+        try {
+            $connection = PostgresDbal::createConnection();
+            $connection->executeQuery('SELECT 1');
+        } catch (\Throwable $e) {
+            self::markTestSkipped('PostgreSQL is not reachable: '.$e->getMessage());
+        }
+
         $this->dbalConnections[] = $connection;
 
         return $connection;
@@ -43,6 +43,9 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
         return new Connection($this->baseOptions($options), $this->dbalConnections[0] ?? $this->createDbalConnection());
     }
 
+    /**
+     * @param array<string, mixed> $options
+     */
     private function createPgConnection(array $options = [], ?DBALConnection $dbal = null): PostgreSqlConnection
     {
         $options = $this->baseOptions($options) + [
@@ -56,7 +59,7 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
 
     protected function tearDown(): void
     {
-        foreach (array_slice($this->dbalConnections, 0, 1) as $dbal) {
+        foreach (\array_slice($this->dbalConnections, 0, 1) as $dbal) {
             foreach ([$this->tableName, $this->indexTableName] as $table) {
                 $dbal->executeStatement(\sprintf('DROP TABLE IF EXISTS "%s"', $table));
             }
@@ -98,7 +101,8 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
         self::assertCount(1, $firstFetch);
 
         // delivered but not acked: hidden from the other consumer
-        self::assertNull($consumerB->get());
+        $hidden = $consumerB->get();
+        self::assertNull($hidden);
 
         // after redeliver_timeout the message becomes visible again
         // (sleep > timeout + 1s: the delivered_at comparison is truncated to whole seconds)
@@ -106,6 +110,51 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
         $redelivered = $consumerB->get();
         self::assertNotNull($redelivered);
         self::assertSame('body', $redelivered[0]['body']);
+    }
+
+    public function testKeepaliveExtendsDeliveryOfALongRunningHandler(): void
+    {
+        // Spec: a handler running longer than redeliver_timeout must not
+        // have its message stolen by a competing consumer while the worker sends
+        // keepalives (messenger:consume --keepalive).
+        $options = ['multiple_consumers' => true, 'redeliver_timeout' => 1];
+
+        $consumerA = $this->createPgConnection($options);
+        $consumerA->listen(false);
+        $consumerA->setup();
+
+        $consumerB = $this->createPgConnection($options, $this->createDbalConnection());
+        $consumerB->listen(false);
+
+        $consumerA->send('body', []);
+        $batch = $consumerA->get();
+        self::assertNotNull($batch);
+        $id = $batch[0]['id'];
+
+        // "Handling" outlives the no-keepalive redelivery horizon (2.3 s, see the
+        // redelivery test above) — periodic keepalives refresh delivered_at.
+        for ($i = 0; $i < 3; ++$i) {
+            usleep(800_000);
+            $consumerA->keepalive($id);
+            self::assertNull($consumerB->get(), 'The kept-alive in-flight row must stay invisible to competing consumers');
+        }
+
+        // Without further keepalives the row is redelivered normally.
+        usleep(2_300_000);
+        $redelivered = $consumerB->get();
+        self::assertNotNull($redelivered);
+        self::assertSame('body', $redelivered[0]['body']);
+    }
+
+    public function testKeepaliveRejectsAnIntervalAboveTheRedeliverTimeout(): void
+    {
+        $connection = $this->createPgConnection(['redeliver_timeout' => 1]);
+        $connection->setup();
+
+        $this->expectException(TransportException::class);
+        $this->expectExceptionMessageMatches('/redeliver_timeout \(1s\) cannot be smaller/');
+
+        $connection->keepalive('1', 5);
     }
 
     public function testAckedMessageIsNotRedelivered(): void

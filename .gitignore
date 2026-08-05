@@ -1,7 +1,7 @@
-*.md
 *.sh
 .phpunit.cache
 composer.lock
 patches.lock.json
 vendor
 config/reference.php
+.phpstan.cache

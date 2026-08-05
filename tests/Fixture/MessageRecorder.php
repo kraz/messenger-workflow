@@ -4,28 +4,48 @@ declare(strict_types=1);
 
 namespace Kraz\MessengerWorkflow\Tests\Fixture;
 
-use Symfony\Contracts\Service\ResetInterface;
-
-final class MessageRecorder implements ResetInterface
+/**
+ * Records which fixture handlers were invoked with which messages.
+ */
+final class MessageRecorder
 {
-    /** @var list<object> */
-    public array $messages = [];
+    /**
+     * @var list<array{handler: string, message: object}>
+     */
+    private array $records = [];
 
-    public function record(object $message): void
+    public function record(string $handler, object $message): void
     {
-        $this->messages[] = $message;
+        $this->records[] = ['handler' => $handler, 'message' => $message];
     }
 
     /**
-     * @return list<object>
+     * @return list<string>
      */
-    public function ofType(string $class): array
+    public function handlersFor(object $message): array
     {
-        return array_values(array_filter($this->messages, static fn (object $m) => $m instanceof $class));
+        return array_values(array_map(
+            static fn (array $record): string => $record['handler'],
+            array_filter($this->records, static fn (array $record): bool => $record['message'] === $message),
+        ));
+    }
+
+    /**
+     * All recorded handler invocations, in order (messages consumed from a transport
+     * are deserialized clones, so identity-based lookup does not apply to them).
+     *
+     * @return list<string>
+     */
+    public function handlerNames(): array
+    {
+        return array_map(
+            static fn (array $record): string => $record['handler'],
+            $this->records,
+        );
     }
 
     public function reset(): void
     {
-        $this->messages = [];
+        $this->records = [];
     }
 }

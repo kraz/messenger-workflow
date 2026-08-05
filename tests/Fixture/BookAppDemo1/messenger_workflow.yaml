@@ -1,0 +1,27 @@
+messenger_workflow:
+    messenger:
+        workflow:
+            worker_defaults:
+                cmd_extra_options:
+                    #limit: ~                  # Limit the number of received messages
+                    #failure_limit: ~          # The number of failed messages the worker can consume
+                    #memory_limit: ~           # The memory limit the worker can consume        
+                    #time_limit: ~             # The time limit in seconds the worker can handle new messages
+                    #sleep: 0.333              # Seconds to sleep before asking for new messages after no messages were found 
+                    verbose: -vv              # Increase the verbosity of messages: 1 for normal output, 2 for more verbose output and 3 for debug
+                supervisor:
+                    # Override the supervisor worker program configuration
+                    # http://supervisord.org/configuration.html#program-x-section-values
+                    # environment: 'APP_ENV=%env(APP_ENV)%'
+                    autostart: true
+                    autorestart: true
+                    startsecs: 0
+                    stopwaitsecs: 20
+                    startretries: 999
+                    stdout_logfile: /dev/stdout
+                    stderr_logfile: /dev/stdout
+                    stdout_logfile_maxbytes: 0
+                    stderr_logfile_maxbytes: 0
+        result_storage:
+            provider: redis
+            service: snc_redis.mwf_cache

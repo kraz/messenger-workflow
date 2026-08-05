@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace Kraz\MessengerWorkflow\Tests\Integration\Doctrine;
 
 use Doctrine\DBAL\Connection as DBALConnection;
-use Kraz\MessengerWorkflow\Messenger\Doctrine\Connection;
+use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Connection;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Uid\Uuid;
 
 /**
  * Spec: Outbox pattern — FIFO ordering by auto-increment id; Inbox pattern — deduplication
- * by message UUID with a tracked message index.
+ * by message UUID with a tracked message index. Ported from the original package.
  */
 abstract class AbstractConnectionTestCase extends TestCase
 {
@@ -32,6 +32,11 @@ abstract class AbstractConnectionTestCase extends TestCase
         $this->indexTableName = 'mwf_idx_'.$suffix;
     }
 
+    /**
+     * @param array<string, mixed> $options
+     *
+     * @return array<string, mixed>
+     */
     protected function baseOptions(array $options = []): array
     {
         return $options + [
@@ -87,6 +92,7 @@ abstract class AbstractConnectionTestCase extends TestCase
         $connection->setup();
         $id = $connection->send('body', []);
 
+        self::assertNotNull($id);
         self::assertTrue($connection->ack($id));
         self::assertSame(0, $connection->getMessageCount());
     }
@@ -125,6 +131,7 @@ abstract class AbstractConnectionTestCase extends TestCase
         $uuid = (string) Uuid::v7();
         $id = $connection->send('body', [], 0, $uuid);
 
+        self::assertNotNull($id);
         self::assertTrue($connection->ack($id, $uuid));
 
         $row = $connection->getDriverConnection()->fetchAssociative(
@@ -141,12 +148,13 @@ abstract class AbstractConnectionTestCase extends TestCase
         $connection = $this->createConnection();
         $connection->setup();
         $id = $connection->send('body', []);
+        self::assertNotNull($id);
 
         self::assertTrue($connection->updateRetryCount($id, 3, 'error details text'));
 
         $row = $connection->find($id);
         self::assertNotNull($row);
-        self::assertSame(3, (int) $row['retry_count']);
+        self::assertSame(3, $row['retry_count']);
     }
 
     public function testUpdateReplacesBodyAndHeaders(): void
@@ -154,10 +162,12 @@ abstract class AbstractConnectionTestCase extends TestCase
         $connection = $this->createConnection();
         $connection->setup();
         $id = $connection->send('body-old', ['a' => '1']);
+        self::assertNotNull($id);
 
         self::assertTrue($connection->update($id, 'body-new', ['b' => '2']));
 
         $row = $connection->find($id);
+        self::assertNotNull($row);
         self::assertSame('body-new', $row['body']);
         self::assertSame(['b' => '2'], $row['headers']);
     }

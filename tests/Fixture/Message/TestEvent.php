@@ -10,8 +10,7 @@ final class TestEvent implements DomainEventInterface
 {
     use EventMetadataTrait;
 
-    public function __construct(
-        public string $name = 'something',
-    ) {
+    public function __construct(public readonly string $payload = 'test')
+    {
     }
 }

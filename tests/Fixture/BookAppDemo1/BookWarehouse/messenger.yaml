@@ -1,0 +1,74 @@
+framework:
+    messenger:
+        transports:
+            # Commands
+            book_warehouse_commands:
+                dsn: 'commands-inbox://book_warehouse'
+                failure_transport: book_warehouse_commands_failures
+            book_warehouse_commands_failures: 'commands-failures://book_warehouse?queue_name=book_warehouse_events'
+            book_warehouse_commands_notifier: 'commands-outbox://book_warehouse'
+            
+            # Events
+            book_warehouse_outbox: 'events-outbox://book_warehouse'
+            book_warehouse_events:
+                dsn: 'events-inbox://book_warehouse'
+                failure_transport: book_warehouse_events_failures
+            book_warehouse_events_failures: 'events-failures://book_warehouse?queue_name=book_warehouse_events'
+
+messenger_workflow:
+    messenger:
+        transports:
+            events:
+                queue_bindings:
+                    - queue: book_warehouse_events
+                      owner: BookWarehouse
+#                      binding_keys:
+#                          - 'Contracts\BookWarehouse\Event\Books\BookRegistered'
+#                          - 'Contracts\BookWarehouse\Event\Books\BookRenamed'
+            commands:
+                queue_bindings:
+                    - queue: book_warehouse_commands
+                      owner: BookWarehouse
+            queries:
+                queue_bindings:
+                    - queue: book_warehouse_queries
+                      owner: BookWarehouse
+        workflow:
+            workers:
+                # Events
+                - name: Book warehouse events publisher
+                  group: Book warehouse
+                  type: event_publisher
+                  source: book_warehouse_outbox
+
+                - name: Book warehouse events receiver
+                  group: Book warehouse
+                  type: event_receiver
+                  queue: book_warehouse_events
+
+                - name: Book warehouse events handler
+                  group: Book warehouse
+                  type: event_handler
+                  source: book_warehouse_events
+                
+                # Commands
+                - name: Book warehouse commands receiver
+                  group: Book warehouse
+                  type: command_receiver
+                  queue: book_warehouse_commands
+
+                - name: Book warehouse commands handler
+                  group: Book warehouse
+                  type: command_handler
+                  source: book_warehouse_commands
+
+                - name: Book warehouse commands notifier
+                  group: Book warehouse
+                  type: command_notifier
+                  source: book_warehouse_commands_notifier
+                
+                # Queries
+                - name: Book warehouse queries handler
+                  group: Book warehouse
+                  type: query_handler
+                  queue: book_warehouse_queries
