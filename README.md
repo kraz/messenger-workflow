@@ -149,15 +149,15 @@ The full configuration shape (all keys, defaults and descriptions) is generated 
 
 ### Transport DSN options
 
-| Option | Transports | Default | Meaning |
-|---|---|---|---|
-| `table_name` | outbox, inbox, failures | `zz_commands_*` / `zz_events_*` | storage table (inbox dedup index table = `<table_name>_index`) |
-| `multiple_consumers` | inbox | commands `true`, events `false` | competing consumers via `FOR UPDATE SKIP LOCKED` |
-| `strict_order` | inbox, outbox | `false` | request single-consumer FIFO; conflicts with `multiple_consumers` (boot-time error) |
-| `transactional_handler` | inbox | commands `true`, events `false` | run handlers inside the inbox-row-deleting transaction |
-| `redeliver_timeout` | inbox, outbox | `300` | seconds before an unacked in-flight row is redelivered |
-| `get_notify_timeout`, `check_delayed_interval` | inbox, outbox (PostgreSQL) | `60000` | LISTEN/NOTIFY wait and re-poll interval (ms) |
-| `queue_name` | failures | — | scopes the stock Doctrine failure transport per queue |
+| Option                                         | Transports                 | Default                         | Meaning                                                                             |
+|------------------------------------------------|----------------------------|---------------------------------|-------------------------------------------------------------------------------------|
+| `table_name`                                   | outbox, inbox, failures    | `zz_commands_*` / `zz_events_*` | storage table (inbox dedup index table = `<table_name>_index`)                      |
+| `multiple_consumers`                           | inbox                      | commands `true`, events `false` | competing consumers via `FOR UPDATE SKIP LOCKED`                                    |
+| `strict_order`                                 | inbox, outbox              | `false`                         | request single-consumer FIFO; conflicts with `multiple_consumers` (boot-time error) |
+| `transactional_handler`                        | inbox                      | commands `true`, events `false` | run handlers inside the inbox-row-deleting transaction                              |
+| `redeliver_timeout`                            | inbox, outbox              | `300`                           | seconds before an unacked in-flight row is redelivered                              |
+| `get_notify_timeout`, `check_delayed_interval` | inbox, outbox (PostgreSQL) | `60000`                         | LISTEN/NOTIFY wait and re-poll interval (ms)                                        |
+| `queue_name`                                   | failures                   | —                               | scopes the stock Doctrine failure transport per queue                               |
 
 ## Usage
 
@@ -250,13 +250,13 @@ bin/console messenger:supervisor-config --output-dir=etc/supervisor   # one <gro
 
 ## Reducing the flow
 
-Any `[...]` segment can be removed per context — each removal is an informed trade-off:
+The optional segments can be removed per context — each removal is an informed trade-off:
 
-| Removed | Consequence |
-|---|---|
-| outbox | The bus publishes straight to AMQP. Dispatch and database commit are separate writes (dual-write risk); broker downtime surfaces at dispatch time. |
-| inbox | The handler worker consumes the broker queue directly (`--queues=<q>`). No deduplication — handlers must be idempotent; per-queue `fromTransport` scoping is unavailable. Map the queue in `orm_mappings` to keep a plain middleware transaction around handlers. The `<queue>_notifier` convention still works. |
-| notifier | Tracked command results are written to the result storage directly from the handler worker (a dual write outside the handler transaction). Untracked commands never used the notifier. |
+| Removed  | Consequence                                                                                                                                                                                                                                                                                                      |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| outbox   | The bus publishes straight to AMQP. Dispatch and database commit are separate writes (dual-write risk); broker downtime surfaces at dispatch time.                                                                                                                                                               |
+| inbox    | The handler worker consumes the broker queue directly (`--queues=<q>`). No deduplication — handlers must be idempotent; per-queue `fromTransport` scoping is unavailable. Map the queue in `orm_mappings` to keep a plain middleware transaction around handlers. The `<queue>_notifier` convention still works. |
+| notifier | Tracked command results are written to the result storage directly from the handler worker (a dual write outside the handler transaction). Untracked commands never used the notifier.                                                                                                                           |
 
 All reductions are exercised by the integration suite (`tests/Integration/Flow/ReducedFlowTest.php`).
 
