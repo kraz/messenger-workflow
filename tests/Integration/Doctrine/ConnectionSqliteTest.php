@@ -6,7 +6,7 @@ namespace Kraz\MessengerWorkflow\Tests\Integration\Doctrine;
 
 use Doctrine\DBAL\Connection as DBALConnection;
 use Doctrine\DBAL\DriverManager;
-use Kraz\MessengerWorkflow\Messenger\Doctrine\Connection;
+use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Connection;
 
 final class ConnectionSqliteTest extends AbstractConnectionTestCase
 {

@@ -6,14 +6,14 @@ namespace Kraz\MessengerWorkflow\Application\Exception;
 
 class TaskFailedException extends \RuntimeException
 {
-    private ?string $taskTrace;
-    private ?string $taskClass;
-
-    public function __construct(string $message = '', int $code = 0, ?string $taskClass = null, ?string $taskTrace = null, ?\Throwable $previous = null)
-    {
+    public function __construct(
+        string $message = '',
+        int $code = 0,
+        private readonly ?string $taskClass = null,
+        private readonly ?string $taskTrace = null,
+        ?\Throwable $previous = null,
+    ) {
         parent::__construct($message, $code, $previous);
-        $this->taskClass = $taskClass;
-        $this->taskTrace = $taskTrace;
     }
 
     public function getTaskClass(): ?string

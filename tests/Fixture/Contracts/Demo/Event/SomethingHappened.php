@@ -11,8 +11,7 @@ final class SomethingHappened implements DomainEventInterface
 {
     use EventMetadataTrait;
 
-    public function __construct(
-        public string $what = 'it',
-    ) {
+    public function __construct(public readonly string $payload = 'test')
+    {
     }
 }

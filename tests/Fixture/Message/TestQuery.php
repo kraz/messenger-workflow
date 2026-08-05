@@ -8,8 +8,7 @@ use Kraz\MessengerWorkflow\Application\QueryInterface;
 
 final class TestQuery implements QueryInterface
 {
-    public function __construct(
-        public string $subject = 'subject',
-    ) {
+    public function __construct(public readonly string $payload = 'test')
+    {
     }
 }

@@ -1,3 +1,6 @@
+# Prepended by MessengerWorkflowBundle. Applications provide the DSNs for the
+# commands/queries/events broker transports; everything else here is the workflow
+# baseline (overridable by the application config).
 framework:
     messenger:
         serializer:
@@ -14,8 +17,13 @@ framework:
                     allow_no_handlers: true
                     allow_no_senders: false
                 middleware:
-                    - messenger_workflow.add_message_id_stamp_middleware
-                    - messenger_workflow.command_middleware
+                    - messenger_workflow.message_id_middleware
+                    - messenger_workflow.amqp_routing_middleware
+                    - messenger_workflow.transaction_middleware
+                    # Inside the transaction: captures tracked command results into the
+                    # notifier outbox; the innermost check enforces exactly one handler.
+                    - messenger_workflow.command_notifier_middleware
+                    - messenger_workflow.exactly_one_handler_middleware
 
             query.bus:
                 default_middleware:
@@ -23,8 +31,12 @@ framework:
                     allow_no_handlers: true
                     allow_no_senders: false
                 middleware:
-                    - messenger_workflow.add_message_id_stamp_middleware
-                    - messenger_workflow.query_middleware
+                    - messenger_workflow.message_id_middleware
+                    - messenger_workflow.amqp_routing_middleware
+                    # The handler worker writes the query result to the result storage;
+                    # the innermost check enforces exactly one handler.
+                    - messenger_workflow.query_result_middleware
+                    - messenger_workflow.exactly_one_handler_middleware
 
             event.bus:
                 default_middleware:
@@ -32,26 +44,37 @@ framework:
                     allow_no_handlers: true
                     allow_no_senders: false
                 middleware:
-                    - messenger_workflow.add_message_id_stamp_middleware
-                    - messenger_workflow.event_middleware
+                    - messenger_workflow.message_id_middleware
+                    - messenger_workflow.amqp_routing_middleware
+                    - messenger_workflow.transaction_middleware
 
-            outbox.bus:
-                default_middleware:
-                    enabled: true
-                    allow_no_handlers: true
-                    allow_no_senders: true
-                middleware:
-                    - messenger_workflow.add_message_id_stamp_middleware
-                    - messenger_workflow.outbox_middleware
-
+            # Internal: consumed by broker receiver workers to move messages into inboxes.
             inbox.bus:
                 default_middleware:
                     enabled: true
                     allow_no_handlers: true
                     allow_no_senders: true
                 middleware:
-                    - messenger_workflow.add_message_id_stamp_middleware
-                    - messenger_workflow.inbox_middleware
+                    - messenger_workflow.inbox_relay_middleware
+
+            # Internal: consumed by notifier outbox workers to publish tracked command
+            # results to the result storage (messenger:consume <x>_notifier --bus=notifier.bus).
+            notifier.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: true
+                middleware:
+                    - messenger_workflow.result_notifier_middleware
+
+            # Internal: consumed by outbox publisher workers to relay rows to the broker.
+            relay.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                    allow_no_senders: true
+                middleware:
+                    - messenger_workflow.outbox_relay_middleware
 
         transports:
             commands:

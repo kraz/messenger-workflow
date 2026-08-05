@@ -8,16 +8,15 @@ use Kraz\MessengerWorkflow\Application\Attribute\AsEventHandler;
 use Kraz\MessengerWorkflow\Tests\Fixture\Message\TransportScopedEvent;
 use Kraz\MessengerWorkflow\Tests\Fixture\MessageRecorder;
 
-final readonly class FromTransportEventHandler
+#[AsEventHandler(fromTransport: 'app_events')]
+final class FromTransportEventHandler
 {
-    public function __construct(
-        private MessageRecorder $recorder,
-    ) {
+    public function __construct(private readonly MessageRecorder $recorder)
+    {
     }
 
-    #[AsEventHandler(fromTransport: 'app_events')]
-    public function onEvent(TransportScopedEvent $event): void
+    public function __invoke(TransportScopedEvent $event): void
     {
-        $this->recorder->record($event);
+        $this->recorder->record(self::class, $event);
     }
 }
