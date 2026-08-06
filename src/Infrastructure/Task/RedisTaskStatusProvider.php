@@ -22,6 +22,7 @@ use Symfony\Component\VarExporter\DeepCloner;
  * |------------------------------------------|-----------|
  * | result exists, payload carries an error  | failed    |
  * | result exists, no error                  | completed |
+ * | result exists but cannot be decoded      | unknown   |
  * | no result, ownership record exists       | pending   |
  * | neither                                  | not found |
  */
@@ -63,10 +64,11 @@ final readonly class RedisTaskStatusProvider implements TaskStatusProviderInterf
             $data = json_decode($payload, true, 512, \JSON_THROW_ON_ERROR);
             $result = \is_array($data) ? DeepCloner::fromArray($data)->clone() : $data;
         } catch (\Throwable $exception) {
-            // A result we cannot decode still proves completion — never surface a 500.
+            // A result we cannot decode proves the task ended, but not how — report
+            // "unknown" rather than claiming success; still never surface a 500.
             $this->logger?->warning('Task result decode failed: '.$exception->getMessage(), ['taskId' => $taskId]);
 
-            return [TaskStatus::Completed, null];
+            return [TaskStatus::Unknown, null];
         }
 
         if ($result instanceof ResultStoragePayload && $result->isError()) {

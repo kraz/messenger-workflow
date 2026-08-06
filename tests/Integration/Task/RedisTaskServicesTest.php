@@ -97,6 +97,16 @@ final class RedisTaskServicesTest extends TestCase
         self::assertNull($masked->getStatus('p10-failed')->error?->class, 'debug=false masks the class');
     }
 
+    public function testAnUndecodableResultMeansUnknownNotCompleted(): void
+    {
+        $this->redis->set('rs:'.self::NAMESPACE.':p10-corrupt', "\x00{not-json", ['ex' => 60]);
+
+        $status = $this->statusProvider->getStatus('p10-corrupt');
+
+        self::assertSame(TaskStatus::Unknown, $status->status, 'A corrupt result proves the task ended, but must not be reported as success');
+        self::assertNull($status->error);
+    }
+
     public function testStatusReadsAreNonDestructive(): void
     {
         $this->resultStorage->write('p10-ttl', 'v');
