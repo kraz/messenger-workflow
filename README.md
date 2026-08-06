@@ -275,6 +275,13 @@ failure transport and the queue resumes. Declaring `strict_order=true` on a tran
 the intent and makes conflicting `multiple_consumers` configuration fail at boot (container
 compile time).
 
+Retry backoff delays apply on the inbox hop too: a retry redelivery stamps the row with an
+`available_at`. In single-consumer FIFO mode a message in backoff **blocks its successors**
+(ordering is preserved — the queue waits, bounded by the flow's total retry budget); in
+competing-consumer mode the row is simply skipped until due. On PostgreSQL a worker sleeping
+on LISTEN/NOTIFY picks a due retry up at the next `check_delayed_interval` re-poll (default
+60 s) — lower that interval on transports where precise backoff timing matters.
+
 ## Failure transports (DLQ) and replays
 
 Inbox deduplication covers **broker redelivery only**: a message UUID already recorded as

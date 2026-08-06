@@ -267,25 +267,29 @@ class Connection implements ResetInterface
 
     /**
      * Rewrites a stored message in place (retry redeliveries of inbox messages). The
-     * delivered_at marker is cleared so the row becomes consumable again immediately —
-     * retry delays are not supported by these tables (no available_at column).
+     * delivered_at marker is cleared so the row becomes consumable again; an optional
+     * available_at defers that consumption (retry backoff on the inbox hop).
      *
      * @param array<array-key, mixed> $headers
      */
-    public function update(int|string $id, string $body, array $headers): bool
+    public function update(int|string $id, string $body, array $headers, ?\DateTimeImmutable $availableAt = null): bool
     {
         $queryBuilder = $this->driverConnection->createQueryBuilder()
             ->update($this->tableName)
             ->set('body', ':p_body')
             ->set('headers', ':p_headers')
             ->set('delivered_at', ':p_delivered_at')
+            ->set('available_at', ':p_available_at')
             ->where('id = :p_id');
 
         return 1 === $this->executeStatement($queryBuilder->getSQL(), [
             'p_body' => $body,
             'p_headers' => json_encode($headers, \JSON_THROW_ON_ERROR),
             'p_delivered_at' => null,
+            'p_available_at' => $availableAt,
             'p_id' => $id,
+        ], [
+            'p_available_at' => Types::DATETIME_IMMUTABLE,
         ]);
     }
 
@@ -325,6 +329,10 @@ class Connection implements ResetInterface
                 $query->getParameters(),
                 $query->getParameterTypes(),
             )->fetchAllAssociative();
+
+            // FIFO: a head row still in retry backoff must block its successors, not
+            // be overtaken — truncate the batch at the first not-yet-available row.
+            $doctrineEnvelopes = $this->truncateAtFirstUnavailable($doctrineEnvelopes);
 
             if ([] === $doctrineEnvelopes) {
                 $this->queueEmptiedAt = microtime(true) * 1000;
@@ -611,6 +619,8 @@ class Connection implements ResetInterface
     {
         $qb = $this->createQueryBuilder();
 
+        // Single-consumer FIFO: no SQL availability filter — a not-yet-available head
+        // must be SEEN to block its successors (get() truncates the batch instead).
         if (!$this->multipleConsumers) {
             return $qb;
         }
@@ -620,11 +630,38 @@ class Connection implements ResetInterface
 
         return $qb
             ->where('m.delivered_at is null OR m.delivered_at < ?')
+            ->andWhere('m.available_at is null OR m.available_at <= ?')
             ->setParameters([
                 $redeliverLimit,
+                $now,
             ], [
                 Types::DATETIME_IMMUTABLE,
+                Types::DATETIME_IMMUTABLE,
             ]);
+    }
+
+    /**
+     * Truncates a FIFO batch at the first row whose available_at lies in the future
+     * (retry backoff): everything before it is deliverable, everything after must
+     * wait to preserve ordering.
+     *
+     * @param list<array<array-key, mixed>> $rows
+     *
+     * @return list<array<array-key, mixed>>
+     */
+    private function truncateAtFirstUnavailable(array $rows): array
+    {
+        $now = new \DateTimeImmutable('UTC');
+        $available = [];
+        foreach ($rows as $row) {
+            $availableAt = $row['available_at'] ?? null;
+            if (\is_string($availableAt) && '' !== $availableAt && new \DateTimeImmutable($availableAt, new \DateTimeZone('UTC')) > $now) {
+                break;
+            }
+            $available[] = $row;
+        }
+
+        return $available;
     }
 
     private function createQueryBuilder(string $alias = 'm'): QueryBuilder
@@ -689,11 +726,13 @@ class Connection implements ResetInterface
         $table->addColumn('body', Types::TEXT, ['notnull' => true]);
         $table->addColumn('headers', Types::TEXT, ['notnull' => true]);
         $table->addColumn('created_at', Types::DATETIME_IMMUTABLE, ['notnull' => true]);
+        $table->addColumn('available_at', Types::DATETIME_IMMUTABLE, ['notnull' => false]);
         $table->addColumn('delivered_at', Types::DATETIME_IMMUTABLE, ['notnull' => false]);
         $table->addColumn('retry_count', Types::INTEGER, ['notnull' => true, 'default' => 0]);
         $table->addColumn('error_details', Types::TEXT, ['notnull' => false]);
         $table->addPrimaryKeyConstraint(new PrimaryKeyConstraint(null, [new UnqualifiedName(Identifier::unquoted('id'))], true));
         $table->addIndex(['delivered_at']);
+        $table->addIndex(['available_at']);
     }
 
     private function addIndexTableToSchema(Schema $schema): void

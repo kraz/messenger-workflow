@@ -112,6 +112,24 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
         self::assertSame('body', $redelivered[0]['body']);
     }
 
+    public function testCompetingConsumersSkipDelayedRowsInsteadOfBlocking(): void
+    {
+        // No ordering guarantee in competing-consumer mode: a row in retry backoff
+        // is skipped by the SQL availability filter, successors are delivered.
+        $connection = $this->createConnection(['multiple_consumers' => true]);
+        $connection->setup();
+        $firstId = $connection->send('b1', []);
+        $connection->send('b2', []);
+        self::assertNotNull($firstId);
+
+        $connection->update($firstId, 'b1', [], new \DateTimeImmutable('+1 hour', new \DateTimeZone('UTC')));
+        self::assertSame(1, $connection->getMessageCount(), 'The available-message count excludes rows in backoff');
+
+        $batch = $connection->get(10);
+        self::assertNotNull($batch);
+        self::assertSame(['b2'], array_column($batch, 'body'), 'The delayed row is skipped, not blocking');
+    }
+
     public function testKeepaliveExtendsDeliveryOfALongRunningHandler(): void
     {
         // Spec: a handler running longer than redeliver_timeout must not

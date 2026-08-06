@@ -14,6 +14,7 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Stamp\DelayStamp;
 use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
 use Symfony\Component\Messenger\Stamp\TransportMessageIdStamp;
 use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
@@ -90,6 +91,23 @@ final class InboxTransportTest extends TestCase
         $this->transport->send($received->with(new RedeliveryStamp(1)));
 
         self::assertSame(1, $this->transport->getMessageCount(), 'The redelivery must not create a second row');
+    }
+
+    public function testARetryDelayStampDefersTheRedeliveredRow(): void
+    {
+        $uuid = (string) Uuid::v7();
+        $this->transport->send($this->envelope($uuid));
+        $envelopes = iterator_to_array($this->transport->get(), false);
+        self::assertCount(1, $envelopes);
+
+        // The retry listener re-sends with the strategy's computed DelayStamp.
+        $this->transport->send($envelopes[0]->with(new RedeliveryStamp(1), new DelayStamp(60_000)));
+
+        self::assertSame(1, $this->transport->getMessageCount(), 'The row is kept');
+        self::assertSame([], iterator_to_array($this->transport->get(), false), 'But not deliverable while in backoff');
+
+        $availableAt = $this->dbal->fetchOne(\sprintf('SELECT available_at FROM "%s"', $this->tableName));
+        self::assertNotNull($availableAt, 'The DelayStamp is persisted as available_at');
     }
 
     public function testRejectOfARetryingMessageKeepsTheRowAndBumpsRetryCount(): void

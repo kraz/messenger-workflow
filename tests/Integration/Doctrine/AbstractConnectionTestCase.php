@@ -183,6 +183,56 @@ abstract class AbstractConnectionTestCase extends TestCase
         $connection->send('body', [], 5000);
     }
 
+    public function testAFutureAvailableAtDefersDeliveryInFifoMode(): void
+    {
+        $connection = $this->createConnection();
+        $connection->setup();
+        $id = $connection->send('body', []);
+        self::assertNotNull($id);
+
+        $connection->update($id, 'body', [], new \DateTimeImmutable('+1 hour', new \DateTimeZone('UTC')));
+        $deferred = $connection->get();
+        self::assertNull($deferred, 'A row in retry backoff must not be deliverable');
+
+        $connection->update($id, 'body', [], new \DateTimeImmutable('-1 second', new \DateTimeZone('UTC')));
+        $batch = $connection->get();
+        self::assertNotNull($batch);
+        self::assertSame('body', $batch[0]['body']);
+    }
+
+    public function testADelayedFifoHeadBlocksItsSuccessors(): void
+    {
+        $connection = $this->createConnection();
+        $connection->setup();
+        $firstId = $connection->send('b1', []);
+        $connection->send('b2', []);
+        self::assertNotNull($firstId);
+
+        $connection->update($firstId, 'b1', [], new \DateTimeImmutable('+1 hour', new \DateTimeZone('UTC')));
+        $blocked = $connection->get(10);
+        self::assertNull($blocked, 'FIFO successors must not overtake a head in retry backoff');
+
+        $connection->update($firstId, 'b1', [], null);
+        $batch = $connection->get(10);
+        self::assertNotNull($batch);
+        self::assertSame(['b1', 'b2'], array_column($batch, 'body'), 'Order is preserved once the head becomes available');
+    }
+
+    public function testADelayedSuccessorDoesNotBlockTheHead(): void
+    {
+        $connection = $this->createConnection();
+        $connection->setup();
+        $connection->send('b1', []);
+        $secondId = $connection->send('b2', []);
+        self::assertNotNull($secondId);
+
+        $connection->update($secondId, 'b2', [], new \DateTimeImmutable('+1 hour', new \DateTimeZone('UTC')));
+        $batch = $connection->get(10);
+
+        self::assertNotNull($batch);
+        self::assertSame(['b1'], array_column($batch, 'body'), 'The batch is truncated at the first not-yet-available row');
+    }
+
     public function testFindAllRespectsLimit(): void
     {
         $connection = $this->createConnection();
