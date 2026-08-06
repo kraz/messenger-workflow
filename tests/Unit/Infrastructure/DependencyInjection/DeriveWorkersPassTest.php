@@ -47,23 +47,27 @@ final class DeriveWorkersPassTest extends TestCase
         new DeriveWorkersPass()->process($container);
     }
 
-    public function testInstancesAboveOneOnASingleConsumerOutboxFailsAtBoot(): void
+    public function testInstancesAboveOneOnAnOutboxFailsAtBootEvenWithMultipleConsumers(): void
     {
+        // The typed outbox factories force multiple_consumers=false — the option
+        // cannot legalize a scaled publisher.
         $container = $this->buildContainer(
-            ['app_outbox' => 'events-outbox://default'],
+            ['app_outbox' => 'events-outbox://default?multiple_consumers=true'],
             [['name' => 'app_outbox publisher', 'type' => 'event_publisher', 'source' => 'app_outbox', 'instances' => 3]],
         );
 
         $this->expectException(\LogicException::class);
-        $this->expectExceptionMessageMatches('/"app_outbox publisher".*"instances: 3".*"app_outbox"/');
+        $this->expectExceptionMessageMatches('/"app_outbox publisher".*"instances: 3".*always single-consumer/');
 
         new DeriveWorkersPass()->process($container);
     }
 
-    public function testInstancesAboveOneWithMultipleConsumersInTheDsnIsAccepted(): void
+    public function testInstancesAboveOneOnACommandsInboxIsAcceptedByDefault(): void
     {
+        // commands-inbox defaults to competing consumers (SKIP LOCKED) — the
+        // documented scale-out case must not be flagged.
         $container = $this->buildContainer(
-            ['app_commands' => 'commands-inbox://default?multiple_consumers=true'],
+            ['app_commands' => 'commands-inbox://default'],
             [['name' => 'app_commands handler', 'type' => 'command_handler', 'source' => 'app_commands', 'instances' => 4]],
         );
 
@@ -72,11 +76,37 @@ final class DeriveWorkersPassTest extends TestCase
         self::assertIsArray($container->getParameter('messenger_workflow.workers'));
     }
 
-    public function testInstancesAboveOneWithMultipleConsumersInTheOptionsIsAccepted(): void
+    public function testStrictOrderSuppressesTheCommandsInboxCompetingConsumersDefault(): void
     {
         $container = $this->buildContainer(
-            ['app_commands' => ['dsn' => 'commands-inbox://default', 'options' => ['multiple_consumers' => true]]],
-            [['name' => 'app_commands handler', 'type' => 'command_handler', 'source' => 'app_commands', 'instances' => 4]],
+            ['app_commands' => 'commands-inbox://default?strict_order=true'],
+            [['name' => 'app_commands handler', 'type' => 'command_handler', 'source' => 'app_commands', 'instances' => 2]],
+        );
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessageMatches('/"app_commands handler".*"instances: 2".*single-consumer transport "app_commands"/');
+
+        new DeriveWorkersPass()->process($container);
+    }
+
+    public function testInstancesAboveOneWithExplicitMultipleConsumersInTheDsnIsAccepted(): void
+    {
+        // events-inbox defaults to single-consumer — the explicit DSN option must win.
+        $container = $this->buildContainer(
+            ['app_events' => 'events-inbox://default?multiple_consumers=true'],
+            [['name' => 'app_events handler', 'type' => 'event_handler', 'source' => 'app_events', 'instances' => 4]],
+        );
+
+        new DeriveWorkersPass()->process($container);
+
+        self::assertIsArray($container->getParameter('messenger_workflow.workers'));
+    }
+
+    public function testInstancesAboveOneWithExplicitMultipleConsumersInTheOptionsIsAccepted(): void
+    {
+        $container = $this->buildContainer(
+            ['app_events' => ['dsn' => 'events-inbox://default', 'options' => ['multiple_consumers' => true]]],
+            [['name' => 'app_events handler', 'type' => 'event_handler', 'source' => 'app_events', 'instances' => 4]],
         );
 
         new DeriveWorkersPass()->process($container);

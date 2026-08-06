@@ -24,6 +24,10 @@ final class DeriveWorkersPass implements CompilerPassInterface
         'inbox://', 'commands-inbox://', 'events-inbox://',
     ];
 
+    // The typed outbox factories force multiple_consumers=false — these sources can
+    // never run more than one process.
+    private const array FORCED_SINGLE_CONSUMER_DSN_PREFIXES = ['commands-outbox://', 'events-outbox://'];
+
     public function process(ContainerBuilder $container): void
     {
         $transportDsns = [];
@@ -86,21 +90,48 @@ final class DeriveWorkersPass implements CompilerPassInterface
 
             $source = \is_scalar($worker['source'] ?? null) ? (string) $worker['source'] : '';
             $dsn = $transportDsns[$source] ?? null;
-            if (null === $dsn || !\in_array(explode('://', $dsn, 2)[0].'://', self::WORKFLOW_DSN_PREFIXES, true)) {
+            $scheme = null !== $dsn ? explode('://', $dsn, 2)[0].'://' : '';
+            if (null === $dsn || !\in_array($scheme, self::WORKFLOW_DSN_PREFIXES, true)) {
                 continue;
             }
 
-            $dsnQuery = [];
-            $rawQuery = parse_url($dsn, \PHP_URL_QUERY);
-            parse_str(\is_string($rawQuery) ? $rawQuery : '', $dsnQuery);
-            $options = $transportOptions[$source] ?? [];
-            if (filter_var($dsnQuery['multiple_consumers'] ?? $options['multiple_consumers'] ?? false, \FILTER_VALIDATE_BOOL)) {
+            $forcedSingleConsumer = \in_array($scheme, self::FORCED_SINGLE_CONSUMER_DSN_PREFIXES, true);
+            if (!$forcedSingleConsumer && $this->resolvesToMultipleConsumers($scheme, $dsn, $transportOptions[$source] ?? [])) {
                 continue;
             }
 
             $name = \is_scalar($worker['name'] ?? null) && '' !== (string) $worker['name'] ? (string) $worker['name'] : $source;
-            throw new \LogicException(\sprintf('Invalid configuration of worker "%s": "instances: %d" on the single-consumer transport "%s" — in this mode consumers take no row locks and every process would handle the same messages. Set "instances: 1" or configure "multiple_consumers=true" on the transport (mutually exclusive with "strict_order").', $name, $instances, $source));
+            $remedy = $forcedSingleConsumer
+                ? 'Outbox transports are always single-consumer — set "instances: 1".'
+                : 'Set "instances: 1" or configure "multiple_consumers=true" on the transport (mutually exclusive with "strict_order").';
+            throw new \LogicException(\sprintf('Invalid configuration of worker "%s": "instances: %d" on the single-consumer transport "%s" — in this mode consumers take no row locks and every process would handle the same messages. %s', $name, $instances, $source, $remedy));
         }
+    }
+
+    /**
+     * Mirrors the transport factories' consumer-mode resolution: an explicit
+     * multiple_consumers (DSN query or options) wins; commands-inbox defaults to
+     * competing consumers unless strict_order suppresses it (CommandsInboxTransportFactory);
+     * every other scheme defaults to single-consumer (Connection default).
+     *
+     * @param array<array-key, mixed> $options
+     */
+    private function resolvesToMultipleConsumers(string $scheme, string $dsn, array $options): bool
+    {
+        $dsnQuery = [];
+        $rawQuery = parse_url($dsn, \PHP_URL_QUERY);
+        parse_str(\is_string($rawQuery) ? $rawQuery : '', $dsnQuery);
+
+        $explicit = $dsnQuery['multiple_consumers'] ?? $options['multiple_consumers'] ?? null;
+        if (null !== $explicit) {
+            return filter_var($explicit, \FILTER_VALIDATE_BOOL);
+        }
+
+        if ('commands-inbox://' === $scheme) {
+            return !filter_var($options['strict_order'] ?? $dsnQuery['strict_order'] ?? false, \FILTER_VALIDATE_BOOL);
+        }
+
+        return false;
     }
 
     private function defaultInstances(ContainerBuilder $container): int
