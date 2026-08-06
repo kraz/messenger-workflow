@@ -120,6 +120,27 @@ final class MessengerSupervisorConfigCommandTest extends TestCase
         self::assertStringContainsString('process_name=%(program_name)s-%(process_num)02d', $display);
     }
 
+    public function testKeepaliveIsRenderedIntoTheConsumeCommand(): void
+    {
+        $tester = new CommandTester($this->command([
+            [
+                'name' => 'App commands handler',
+                'group' => 'App',
+                'type' => 'command_handler',
+                'source' => 'app_commands',
+                'target' => 'command.bus',
+                'cmd_extra_options' => ['keepalive' => 60],
+            ],
+        ]));
+
+        self::assertSame(0, $tester->execute([]));
+
+        self::assertStringContainsString(
+            'command=bin/console messenger:consume --bus=command.bus --keepalive=60 app_commands',
+            $tester->getDisplay(),
+        );
+    }
+
     public function testDuplicateProgramNamesAreRejected(): void
     {
         $tester = new CommandTester($this->command([

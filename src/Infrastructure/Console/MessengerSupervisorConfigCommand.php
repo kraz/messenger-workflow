@@ -185,6 +185,7 @@ class MessengerSupervisorConfigCommand extends Command
             'time_limit' => '--time-limit=%s',
             'fetch_size' => '--fetch-size=%s',
             'sleep' => '--sleep=%s',
+            'keepalive' => '--keepalive=%s',
             'verbose' => '%s',
         ];
         $options = [];

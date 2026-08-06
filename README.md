@@ -237,12 +237,17 @@ messenger_workflow:
             worker_defaults:
                 supervisor: { autostart: true, autorestart: true, stdout_logfile: /dev/stdout }
             workers:
-                - { name: Book store commands handler, type: command_handler, source: book_store_commands, instances: 4 }
+                - { name: Book store commands handler, type: command_handler, source: book_store_commands, instances: 4, cmd_extra_options: { keepalive: 60 } }
                 - { name: Book store events receiver, type: event_receiver, queue: book_store_events, enabled: false }
 ```
 
 Manual entries merge with the derived set by name or `type|source|queue` identity; `enabled:
-false` removes a worker; `labels` carries free-form metadata. Generate the supervisord config:
+false` removes a worker; `labels` carries free-form metadata. `cmd_extra_options.keepalive`
+renders `messenger:consume --keepalive=<s>`, protecting a long-running handler on a
+competing-consumer source from mid-flight redelivery (keep it below the transport's
+`redeliver_timeout`; single-consumer sources ignore the in-flight marker entirely).
+`instances > 1` requires a competing-consumer source — on a single-consumer transport the
+container fails at compile time, because every process would handle the same messages. Generate the supervisord config:
 
 ```bash
 bin/console messenger:supervisor-config                               # stdout

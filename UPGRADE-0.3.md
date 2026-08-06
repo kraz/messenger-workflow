@@ -254,7 +254,8 @@ and a wall-clock cap. The configured backoff delays take full effect on the brok
 - The inbox/outbox transports support the worker keepalive mechanism
   (`messenger:consume --keepalive`): a long-running handler periodically refreshes its
   in-flight marker instead of being redelivered to a competing consumer after
-  `redeliver_timeout`.
+  `redeliver_timeout`. Generated workers opt in via
+  `workflow.workers[].cmd_extra_options.keepalive: <seconds>`.
 - Any flow segment (outbox, inbox, notifier) can be removed per configuration — see the
   README's flow-reduction section for the dual-write and idempotency trade-offs.
 - Exactly-one-handler enforcement for commands/queries at consume time; zero handlers on
