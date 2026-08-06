@@ -56,7 +56,8 @@ Segments in `[...]` are optional per configuration — see [Reducing the flow](#
   `messenger:consume --keepalive`.
 - **Tracked tasks**: tracked command results and all query results land in the result storage
   (Redis in production, in-memory for tests/dev) under `rs:[<ns>:]<uuid>`. Optional task services
-  add ownership records, a status provider (`pending|completed|failed`) and a non-blocking result
+  add ownership records, a status provider (`pending|completed|failed`, plus `unknown` for a
+  result that exists but cannot be decoded — never misreported as success) and a non-blocking result
   provider.
 - **Opinionated retry policies** per flow (commands / queries / events) with transient-error
   detection, exception-class lists, custom decider services, exponential backoff + jitter and
