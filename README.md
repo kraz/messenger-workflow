@@ -299,6 +299,15 @@ the inbox ack). The operational consequences:
 - Replay order is the failure transport's, not the original queue order — relevant for
   strictly-ordered event streams.
 
+**Why replays do not consult the dedup index (decision, 0.4):** the index marks a message
+UUID processed on *both* terminal outcomes — successful ack and permanent rejection — so
+every message sitting in a failure transport is already marked processed, and a dedup check
+on replay would block **all** replays. More fundamentally, no marker can distinguish "failed
+before applying its side effects" from "failed after": whether a replay is safe is a property
+of the handler, not of the message's delivery history. Idempotent handlers and
+`transactional_handler=true` are the supported mechanisms; the bypass is deliberate and will
+stay.
+
 ## Testing
 
 The PHPUnit suite (unit + functional + integration) expects live local infrastructure for the
