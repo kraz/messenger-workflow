@@ -275,6 +275,23 @@ failure transport and the queue resumes. Declaring `strict_order=true` on a tran
 the intent and makes conflicting `multiple_consumers` configuration fail at boot (container
 compile time).
 
+## Failure transports (DLQ) and replays
+
+Inbox deduplication covers **broker redelivery only**: a message UUID already recorded as
+processed is dropped when RabbitMQ delivers it again. An operator replay
+(`messenger:failed:retry`) deliberately **bypasses** that record and re-executes the handler —
+that is the escape hatch for the crash window where a message was marked processed but its side
+effects were lost (e.g. a non-transactional handler crashing between the application write and
+the inbox ack). The operational consequences:
+
+- Handlers behind an inbox must stay **idempotent under operator replay** — replaying an
+  already-applied event otherwise re-applies it (a projector may resurrect a deleted row).
+- `transactional_handler=true` commits the application writes atomically with the inbox-row
+  removal (same DBAL connection), closing the crash window that makes replays necessary — and
+  with it most of the double-execution risk.
+- Replay order is the failure transport's, not the original queue order — relevant for
+  strictly-ordered event streams.
+
 ## Testing
 
 The PHPUnit suite (unit + functional + integration) expects live local infrastructure for the
