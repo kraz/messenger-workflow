@@ -19,9 +19,15 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
  */
 final class DeriveWorkersPass implements CompilerPassInterface
 {
+    private const array WORKFLOW_DSN_PREFIXES = [
+        'outbox://', 'commands-outbox://', 'events-outbox://',
+        'inbox://', 'commands-inbox://', 'events-inbox://',
+    ];
+
     public function process(ContainerBuilder $container): void
     {
         $transportDsns = [];
+        $transportOptions = [];
         foreach ($container->getExtensionConfig('framework') as $frameworkConfig) {
             $messengerConfig = \is_array($frameworkConfig['messenger'] ?? null) ? $frameworkConfig['messenger'] : [];
             $transports = \is_array($messengerConfig['transports'] ?? null) ? $messengerConfig['transports'] : [];
@@ -29,6 +35,9 @@ final class DeriveWorkersPass implements CompilerPassInterface
                 $dsn = \is_string($transport) ? $transport : (\is_array($transport) && \is_string($transport['dsn'] ?? null) ? $transport['dsn'] : null);
                 if (\is_string($dsn)) {
                     $transportDsns[(string) $name] = $dsn;
+                }
+                if (\is_array($transport) && \is_array($transport['options'] ?? null)) {
+                    $transportOptions[(string) $name] = array_replace($transportOptions[(string) $name] ?? [], $transport['options']);
                 }
             }
         }
@@ -48,9 +57,58 @@ final class DeriveWorkersPass implements CompilerPassInterface
         /** @var list<array<array-key, mixed>> $manualWorkers */
         $manualWorkers = \is_array($manualWorkers) ? array_values(array_filter($manualWorkers, \is_array(...))) : [];
 
-        $container->setParameter(
-            'messenger_workflow.workers',
-            new WorkerSetDeriver()->derive($transportDsns, $queueBindings, $manualWorkers),
-        );
+        $workers = new WorkerSetDeriver()->derive($transportDsns, $queueBindings, $manualWorkers);
+        $this->assertInstancesMatchConsumerMode($workers, $transportDsns, $transportOptions, $this->defaultInstances($container));
+
+        $container->setParameter('messenger_workflow.workers', $workers);
+    }
+
+    /**
+     * Boot-time guard: in single-consumer mode the inbox/outbox get() takes no row
+     * locks and never marks rows as delivered, so N processes consuming the same
+     * source transport would process the same rows N times. A worker with
+     * instances > 1 therefore requires multiple_consumers=true on its source.
+     *
+     * The effective instance count mirrors the supervisor command's render-time
+     * merge: an explicit worker value wins, otherwise worker_defaults applies.
+     *
+     * @param list<array<array-key, mixed>> $workers
+     * @param array<string, string>         $transportDsns
+     * @param array<string, array<array-key, mixed>> $transportOptions
+     */
+    private function assertInstancesMatchConsumerMode(array $workers, array $transportDsns, array $transportOptions, int $defaultInstances): void
+    {
+        foreach ($workers as $worker) {
+            $instances = is_numeric($worker['instances'] ?? null) ? (int) $worker['instances'] : $defaultInstances;
+            if ($instances <= 1) {
+                continue;
+            }
+
+            $source = \is_scalar($worker['source'] ?? null) ? (string) $worker['source'] : '';
+            $dsn = $transportDsns[$source] ?? null;
+            if (null === $dsn || !\in_array(explode('://', $dsn, 2)[0].'://', self::WORKFLOW_DSN_PREFIXES, true)) {
+                continue;
+            }
+
+            $dsnQuery = [];
+            $rawQuery = parse_url($dsn, \PHP_URL_QUERY);
+            parse_str(\is_string($rawQuery) ? $rawQuery : '', $dsnQuery);
+            $options = $transportOptions[$source] ?? [];
+            if (filter_var($dsnQuery['multiple_consumers'] ?? $options['multiple_consumers'] ?? false, \FILTER_VALIDATE_BOOL)) {
+                continue;
+            }
+
+            $name = \is_scalar($worker['name'] ?? null) && '' !== (string) $worker['name'] ? (string) $worker['name'] : $source;
+            throw new \LogicException(\sprintf('Invalid configuration of worker "%s": "instances: %d" on the single-consumer transport "%s" — in this mode consumers take no row locks and every process would handle the same messages. Set "instances: 1" or configure "multiple_consumers=true" on the transport (mutually exclusive with "strict_order").', $name, $instances, $source));
+        }
+    }
+
+    private function defaultInstances(ContainerBuilder $container): int
+    {
+        $defaults = $container->hasParameter('messenger_workflow.workflow.worker_defaults')
+            ? $container->getParameter('messenger_workflow.workflow.worker_defaults')
+            : [];
+
+        return \is_array($defaults) && is_numeric($defaults['instances'] ?? null) ? (int) $defaults['instances'] : 1;
     }
 }

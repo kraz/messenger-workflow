@@ -445,6 +445,10 @@ class MessengerWorkflowBundle extends AbstractBundle
             'messenger_workflow.workflow.workers',
             \is_array($workflowConfig['workers'] ?? null) ? $workflowConfig['workers'] : [],
         );
+        $container->parameters()->set(
+            'messenger_workflow.workflow.worker_defaults',
+            \is_array($workflowConfig['worker_defaults'] ?? null) ? $workflowConfig['worker_defaults'] : [],
+        );
         // Overwritten by DeriveWorkersPass with the derived + merged worker set.
         $container->parameters()->set('messenger_workflow.workers', []);
 
@@ -452,7 +456,7 @@ class MessengerWorkflowBundle extends AbstractBundle
         $services->set('messenger_workflow.supervisor_config_command')
             ->class(MessengerSupervisorConfigCommand::class)
             ->arg('$workersConfig', '%messenger_workflow.workers%')
-            ->arg('$workersDefaultConfig', \is_array($workflowConfig['worker_defaults'] ?? null) ? $workflowConfig['worker_defaults'] : [])
+            ->arg('$workersDefaultConfig', '%messenger_workflow.workflow.worker_defaults%')
             ->arg('$params', service('parameter_bag'))
             ->tag('console.command');
     }
