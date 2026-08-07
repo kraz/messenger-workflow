@@ -39,6 +39,9 @@ Query:   ask()/askAsync() → RabbitMQ (direct exchange "queries") → handler w
 Segments in `[...]` are optional per configuration — see [Reducing the flow](#reducing-the-flow).
 `⇄` marks the at-least-once hand-offs: a failed hand-off keeps the message on the safe side.
 
+Every flow variant is traced end to end — configuration, derived workers, the exact worker
+commands and what happens at each hop — in **[MESSAGE_FLOWS.md](MESSAGE_FLOWS.md)**.
+
 ## Features
 
 - **Transactional outbox** (`*-outbox://` transports): messages are stored with your domain
@@ -147,6 +150,162 @@ bin/console messenger:setup-transports
 
 The full configuration shape (all keys, defaults and descriptions) is generated into
 [`config/reference.php`](config/reference.php).
+
+### Full default configuration
+
+All keys of the `messenger_workflow` extension with their default values and inlined
+comments (cross-check anytime with `bin/console config:dump-reference messenger_workflow`):
+
+```yaml
+messenger_workflow:
+    messenger:
+
+        # Broker transport add-ons, keyed by the framework.messenger transport name.
+        # Only meaningful for the AMQP broker transports ("commands", "queries", "events").
+        transports:
+
+            # Prototype — example key: "commands"
+            name:
+
+                # Maps broker queues to entity manager names (used when handling WITHOUT
+                # an inbox): the workflow transaction middleware wraps the queue's
+                # handlers in a plain transaction on the mapped entity manager's (or,
+                # as a fallback, DBAL connection's) database.
+                orm_mappings: []
+                    # book_store_commands: book_store          # short form
+                    # book_store_commands: { orm: book_store } # long form
+
+                # Queues of this broker transport: each entry declares the owning
+                # bounded context and optional explicit binding keys. Binding keys are
+                # derived from the owner (own internal messages; "<ctx>.#" wildcard on
+                # the topic exchange, public + internal key on direct exchanges), the
+                # #[AsEventHandler(fromTransport: ...)] handler declarations (topic
+                # exchange only) and the explicit "binding_keys" list.
+                queue_bindings: []
+                    # - { queue: book_store_commands, owner: BookStore }
+                    # - { queue: book_store_events, owner: BookStore,
+                    #     binding_keys: ['Contracts\Billing\Event\InvoicePaid'] }
+
+        defaults:
+
+            # Default await() timeout in seconds for command/query tasks.
+            await_timeout: 300
+
+            # Command retry policy: no retries by default; transient infrastructure
+            # errors are retried with exponential backoff and jitter within a small
+            # total time budget. Applied to commands inboxes — or, in no-inbox mode,
+            # to the "commands" broker transport itself.
+            command_retry:
+                transient_max_retries: 3
+                delay: 1000               # initial retry delay in milliseconds
+                multiplier: 2.0
+                max_delay: 10000          # max delay per retry in ms (0 = uncapped)
+                jitter: 0.1               # randomness applied to the delay (0..1)
+                max_total_delay: 30000    # total retry-time budget in ms (0 = unbounded)
+                # Exception classes (instanceof match) that force a retry.
+                retryable_exceptions: []
+                # Exception classes (instanceof match) that force a permanent failure.
+                # Wins over retryable_exceptions.
+                non_retryable_exceptions: []
+
+            # Query retry policy: aggressive fast retries on transient infrastructure
+            # errors only. No failure transport — a permanent failure is reported to
+            # the asker through the result storage and the message is dropped.
+            query_retry:
+                transient_max_retries: 10
+                delay: 100
+                multiplier: 2.0
+                max_delay: 5000
+                jitter: 0.1
+                max_total_delay: 60000
+                retryable_exceptions: []
+                non_retryable_exceptions: []
+
+            # Event retry policy: always retried (exponential backoff and jitter)
+            # within a bounded total time budget, then DLQ — a poison message cannot
+            # block an ordered queue forever.
+            event_retry:
+                max_retries: 20
+                delay: 1000
+                multiplier: 2.0
+                max_delay: 60000
+                jitter: 0.1
+                max_total_delay: 900000   # 15 minutes
+                retryable_exceptions: []
+                non_retryable_exceptions: []
+
+        # Per-context outbox buses: "<context>: <outbox transport name>" registers an
+        # OutboxBusInterface implementation "messenger_workflow.outbox_bus.<context>",
+        # autowirable as "OutboxBusInterface $<context>OutboxBus" (single entries also
+        # alias the bare interface).
+        outbox_buses: []
+            # book_store: book_store_outbox
+
+        result_storage:
+            # "memory" (single-process, tests/dev), "redis", or a custom suffix
+            # resolved as service "messenger_workflow.result_storage.<provider>".
+            provider: memory
+            # Service id of the \Redis client used by the redis provider.
+            service: null             # default "redis_client.default"
+            # Optional key namespace: results are stored as rs:<namespace>:<taskId>.
+            namespace: null
+            # TTL in seconds applied to stored results.
+            expire_input_after: 10800 # 3 hours
+            # If set, a successful await() re-expires the result after this many
+            # seconds. Off by default: awaiting never shortens the result TTL.
+            expire_after_await: null
+
+        workflow:
+
+            # Defaults merged into every worker (derived and manual) — same keys as a
+            # "workers" entry; typically used for shared supervisor options.
+            worker_defaults: []
+                # supervisor: { autostart: true, autorestart: true }
+
+            # Manual worker declarations. They MERGE with the auto-derived set: an
+            # entry matching a derived worker by name or by type+source+queue identity
+            # overrides it; unmatched entries are added; "enabled: false" removes.
+            workers: []
+                # -
+                #     name: Book store commands handler
+                #     group: book_store       # supervisord group (default: derived context)
+                #     # One of: event_publisher, event_receiver, event_handler,
+                #     # command_receiver, command_handler, command_notifier, query_handler.
+                #     # The type presets source/target buses; *_publisher/*_handler/
+                #     # *_notifier require "source", *_receiver/query_handler require "queue".
+                #     type: command_handler
+                #     source: book_store_commands   # transport consumed (messenger:consume <source>)
+                #     target: command.bus           # bus dispatched on (--bus=<target>; preset by type)
+                #     queue: ''                     # broker queue (--queues=<queue>)
+                #     enabled: true                 # false removes a derived worker
+                #     instances: 1                  # >1 requires a competing-consumer source
+                #     labels: []                    # free-form metadata (e.g. for deploy tooling)
+                #     cmd_extra_options:            # rendered as messenger:consume options
+                #         limit: ~                  # --limit
+                #         failure_limit: ~          # --failure-limit
+                #         memory_limit: ~           # --memory-limit
+                #         time_limit: ~             # --time-limit
+                #         fetch_size: ~             # --fetch-size (min 1)
+                #         sleep: ~                  # --sleep (receivers/query handlers default to 0)
+                #         # --keepalive: a long-running handler refreshes its in-flight
+                #         # marker instead of being redelivered after redeliver_timeout.
+                #         # Only meaningful on multiple_consumers=true sources; keep it
+                #         # below the transport's redeliver_timeout.
+                #         keepalive: ~
+                #         verbose: ~                # e.g. "-vv"
+                #     supervisor: []                # raw supervisord program options
+
+        tasks:
+            # Registers the Redis task services (ownership registry, status/result
+            # providers) and the tracking bus decorators. Requires the "redis"
+            # result_storage provider (shares its client and key namespace).
+            enabled: false
+            # TTL in seconds of task ownership records — keep it above the result TTL
+            # so ownership outlives results.
+            ownership_ttl: 14400      # 4 hours
+            # Expose exception class names in task errors.
+            debug: null               # default: %kernel.debug%
+```
 
 ### Transport DSN options
 
@@ -264,7 +423,8 @@ The optional segments can be removed per context — each removal is an informed
 | inbox    | The handler worker consumes the broker queue directly (`--queues=<q>`). No deduplication — handlers must be idempotent; per-queue `fromTransport` scoping is unavailable. Map the queue in `orm_mappings` to keep a plain middleware transaction around handlers. The `<queue>_notifier` convention still works. |
 | notifier | Tracked command results are written to the result storage directly from the handler worker (a dual write outside the handler transaction). Untracked commands never used the notifier.                                                                                                                           |
 
-All reductions are exercised by the integration suite (`tests/Integration/Flow/ReducedFlowTest.php`).
+All reductions are exercised by the integration suite (`tests/Integration/Flow/ReducedFlowTest.php`)
+and walked through hop by hop in [MESSAGE_FLOWS.md](MESSAGE_FLOWS.md#reduced-flows).
 
 ## Ordered event delivery
 
