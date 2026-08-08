@@ -49,7 +49,7 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
     private function createPgConnection(array $options = [], ?DBALConnection $dbal = null): PostgreSqlConnection
     {
         $options = $this->baseOptions($options) + [
-            // keep the LISTEN fallback in get() from blocking the test
+            // short listener wait and fallback re-poll boundary for tests
             'get_notify_timeout' => 100,
             'check_delayed_interval' => 200,
         ];
@@ -79,6 +79,64 @@ final class ConnectionPostgreSqlTest extends AbstractConnectionTestCase
         $sender->send('body', []);
 
         self::assertTrue($listener->waitForNotify(2000), 'Expected a NOTIFY after outbox insert');
+    }
+
+    public function testGetFallbackDoesNotBlockWaitingForNotify(): void
+    {
+        // get() is called for a single receiver of a worker that may consume several
+        // transports: a blocking wait here would starve the sibling receivers and
+        // override the worker's polling rate (--sleep) and deadline (--time-limit).
+        // All blocking belongs to PostgreSqlNotifyOnIdleListener.
+        $connection = $this->createPgConnection([
+            'get_notify_timeout' => 60000,
+            'check_delayed_interval' => 60000,
+        ]);
+        $connection->setup();
+
+        self::assertNull($connection->get(), 'The queue starts empty');
+
+        // second call on the emptied queue takes the LISTEN fallback path
+        $start = microtime(true);
+        self::assertNull($connection->get());
+        self::assertLessThan(0.5, microtime(true) - $start, 'The fallback in get() must not wait for a NOTIFY');
+    }
+
+    public function testGetFallbackCollectsAlreadyArrivedNotifications(): void
+    {
+        // A NOTIFY that arrived between two get() calls must trigger a fetch even
+        // before the check_delayed_interval re-poll boundary is reached.
+        $connection = $this->createPgConnection([
+            'get_notify_timeout' => 60000,
+            'check_delayed_interval' => 60000,
+        ]);
+        $connection->setup();
+
+        $initialFetch = $connection->get();
+        self::assertNull($initialFetch, 'The queue starts empty');
+        $fallbackFetch = $connection->get();
+        self::assertNull($fallbackFetch, 'The fallback registers the LISTEN');
+
+        $sender = $this->createPgConnection([], $this->createDbalConnection());
+        $sender->send('body', []);
+
+        // give the notification time to reach the consuming session
+        usleep(100_000);
+
+        $batch = $connection->get();
+        self::assertNotNull($batch, 'A pending NOTIFY must trigger a fetch without waiting for the re-poll boundary');
+        self::assertSame('body', $batch[0]['body']);
+    }
+
+    public function testWaitForNotifyBlocksForTheFullTimeout(): void
+    {
+        // The full timeout must reach getNotify() on the listener path: the no-wait
+        // rule applies to the fallback in get() only, never to waitForNotify().
+        $connection = $this->createPgConnection();
+        $connection->setup();
+
+        $start = microtime(true);
+        self::assertFalse($connection->waitForNotify(300), 'No NOTIFY is expected on an idle queue');
+        self::assertGreaterThan(0.25, microtime(true) - $start, 'waitForNotify() must wait the full timeout');
     }
 
     public function testMultipleConsumersLockAndRedeliverMessages(): void

@@ -10,17 +10,21 @@ use Symfony\Component\Messenger\Exception\TransportException;
 /**
  * Uses PostgreSQL LISTEN/NOTIFY to push messages to workers.
  *
- * Blocking on the notification can either happen inside {@see self::get()} (fallback used
- * when no external listener is wired up) or be delegated to
+ * All blocking on the notification is delegated to
  * {@see \Kraz\MessengerWorkflow\Infrastructure\Messenger\EventListener\PostgreSqlNotifyOnIdleListener},
- * which waits only when the worker is idle. The latter lets a single worker consume from
- * several queues without one queue's blocking wait starving the others.
+ * which waits only while the worker is idle and knows how long the worker can afford to
+ * block (sibling transports, worker sleep, --time-limit). get() itself never waits: it is
+ * called for a single receiver of a worker that may consume several transports, so a wait
+ * here would starve the sibling receivers and override the worker's polling rate. When no
+ * listener is wired up, the fallback in get() only collects notifications that already
+ * arrived.
  */
 class PostgreSqlConnection extends Connection
 {
     /**
      * * check_delayed_interval: The interval to check for messages anyway, in milliseconds. Set to 0 to disable checks. Default: 60000 (1 minute)
-     * * get_notify_timeout: The maximum time to wait for a NOTIFY, in milliseconds. Default: 60000 (1 minute).
+     * * get_notify_timeout: The maximum time PostgreSqlNotifyOnIdleListener waits for a NOTIFY while the worker
+     *                       is idle, in milliseconds. Set to 0 to disable waiting. Default: 60000 (1 minute).
      */
     protected const array DEFAULT_OPTIONS = parent::DEFAULT_OPTIONS + [
         'check_delayed_interval' => 60000,
@@ -78,28 +82,25 @@ class PostgreSqlConnection extends Connection
             return parent::get($fetchSize);
         }
 
-        // Fallback: when no external listener handles LISTEN/NOTIFY, block here
-        // until a notification arrives or the timeout expires.
+        // Fallback: when no external listener handles LISTEN/NOTIFY, only collect the
+        // notifications that already arrived. Waiting for one is up to
+        // PostgreSqlNotifyOnIdleListener, which knows how long the worker can afford to
+        // block, while get() is called for a single receiver of that worker.
 
         // This is secure because the table name must be a valid identifier:
         // https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
         $this->executeStatement(\sprintf('LISTEN "%s"', $this->tableName));
         $this->listening = true;
 
-        // Wait at most until the next check_delayed_interval boundary so the worker re-polls
-        // even if no NOTIFY arrives (e.g. a notification missed between emptying the queue
-        // and listening).
-        $checkDelayedInterval = $this->getCheckDelayedIntervalMs();
-        $timeout = $checkDelayedInterval - (microtime(true) * 1000 - $this->queueEmptiedAt);
-        $notifyTimeout = $this->getNotifyTimeoutMs();
-        $timeout = max(0, (int) ceil(min(0 !== $notifyTimeout ? (float) $notifyTimeout : $timeout, $timeout)));
-
-        $notification = $this->getNotify($timeout);
+        $notification = $this->getNotify(0);
         if (
             // no notification, or a notification for another table
             (false === $notification || ($notification['message'] ?? null) !== $this->tableName)
-            && (microtime(true) * 1000 - $this->queueEmptiedAt < $checkDelayedInterval)
+            // the check_delayed_interval re-poll boundary is not reached yet
+            && (microtime(true) * 1000 - $this->queueEmptiedAt < $this->getCheckDelayedIntervalMs())
         ) {
+            usleep(1000);
+
             return null;
         }
 

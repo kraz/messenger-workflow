@@ -406,7 +406,22 @@ renders `messenger:consume --keepalive=<s>`, protecting a long-running handler o
 competing-consumer source from mid-flight redelivery (keep it below the transport's
 `redeliver_timeout`; single-consumer sources ignore the in-flight marker entirely).
 `instances > 1` requires a competing-consumer source — on a single-consumer transport the
-container fails at compile time, because every process would handle the same messages. Generate the supervisord config:
+container fails at compile time, because every process would handle the same messages.
+
+`cmd_extra_options.sleep` renders `messenger:consume --sleep=<s>`, the idle pause between
+polls. The derived defaults are already tuned per transport kind and rarely need overriding:
+broker-queue workers (receivers, query handlers, no-inbox handlers) get `sleep: 0` because the
+AMQP consumer blocks on the broker socket — no polling loop exists to pace. PostgreSQL-backed
+workers (publishers, notifiers, inbox handlers) keep the messenger default (1 s), but their
+idle pacing really comes from LISTEN/NOTIFY: the worker blocks query-free until a notification
+or the `get_notify_timeout` wake-up, so lowering `sleep` there buys nothing. One combination to
+avoid: `sleep: 0` on a worker that consumes a PostgreSQL transport **together with** another
+transport in one `messenger:consume` — with mixed transports the NOTIFY wait is capped to the
+worker's sleep to keep the sibling transport polled, and a zero cap disables the wait entirely,
+leaving an unpaced loop of empty polls against the database. Keep the derived
+one-transport-per-worker shape and `sleep: 0` stays where it belongs — on AMQP-only workers.
+
+Generate the supervisord config:
 
 ```bash
 bin/console messenger:supervisor-config                               # stdout
@@ -439,8 +454,11 @@ Retry backoff delays apply on the inbox hop too: a retry redelivery stamps the r
 `available_at`. In single-consumer FIFO mode a message in backoff **blocks its successors**
 (ordering is preserved — the queue waits, bounded by the flow's total retry budget); in
 competing-consumer mode the row is simply skipped until due. On PostgreSQL a worker sleeping
-on LISTEN/NOTIFY picks a due retry up at the next `check_delayed_interval` re-poll (default
-60 s) — lower that interval on transports where precise backoff timing matters.
+on LISTEN/NOTIFY picks a due retry up at the next idle wake-up — governed by
+`get_notify_timeout` (default 60 s) with the idle listener active (the normal bundle mode),
+or by the `check_delayed_interval` re-poll (default 60 s) when the transport is wired
+standalone without the listener. Lower the matching interval on transports where precise
+backoff timing matters.
 
 ## Failure transports (DLQ) and replays
 

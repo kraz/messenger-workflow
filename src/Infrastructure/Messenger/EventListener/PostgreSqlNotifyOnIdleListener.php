@@ -17,8 +17,11 @@ use Symfony\Component\Messenger\Event\WorkerStartedEvent;
  * that consume from multiple queues.
  *
  * Ported from Symfony's PostgreSqlNotifyOnIdleListener for the workflow outbox/inbox
- * transports. The delayed-message capping of the upstream listener is intentionally
- * omitted: the workflow message tables do not support delaying messages.
+ * transports. The delayed-message capping of the upstream listener (waking up in time
+ * for the earliest future available_at) is intentionally omitted: the only delayed rows
+ * in the workflow tables are inbox retries in backoff, and those are picked up at the
+ * next get_notify_timeout wake-up instead of on an exact schedule (see the retry
+ * backoff notes in README.md). Port the upstream cap if exact retry timing is needed.
  */
 class PostgreSqlNotifyOnIdleListener implements EventSubscriberInterface
 {
