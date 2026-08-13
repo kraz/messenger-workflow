@@ -19,6 +19,7 @@ use Kraz\MessengerWorkflow\Domain\OutboxBusInterface;
 use Kraz\MessengerWorkflow\Infrastructure\Console\MessengerSupervisorConfigCommand;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\ConfigureTransportsPass;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\DeriveWorkersPass;
+use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\MethodHandlerArgumentsPass;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Failure\CommandsFailuresTransportFactory;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Failure\EventsFailuresTransportFactory;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Inbox\CommandsInboxTransportFactory;
@@ -65,6 +66,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ServicesConfigurator;
 use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
+use Symfony\Component\Messenger\Handler\BatchHandlerInterface;
 use Symfony\Component\Messenger\Retry\MultiplierRetryStrategy;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
@@ -293,6 +295,9 @@ class MessengerWorkflowBundle extends AbstractBundle
     {
         parent::build($container);
 
+        // Priority 1: after the autoconfigured tags materialize (built-in passes run at
+        // priority 100) and before Symfony's MessengerPass (priority 0) consumes them.
+        $container->addCompilerPass(new MethodHandlerArgumentsPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, 1);
         $container->addCompilerPass(new ConfigureTransportsPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
         $container->addCompilerPass(new DeriveWorkersPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
     }
@@ -732,9 +737,23 @@ class MessengerWorkflowBundle extends AbstractBundle
                 }
 
                 $tagAttributes['method'] = $reflector->getName();
+                $handlerClass = $reflector->getDeclaringClass();
+                $handlerMethod = $reflector;
+            } else {
+                $handlerClass = $reflector instanceof \ReflectionClass ? $reflector : null;
+                $methodName = \is_string($tagAttributes['method'] ?? null) && '' !== $tagAttributes['method'] ? $tagAttributes['method'] : '__invoke';
+                $handlerMethod = null !== $handlerClass && $handlerClass->hasMethod($methodName) ? $handlerClass->getMethod($methodName) : null;
             }
 
-            $definition->addTag('messenger.message_handler', $tagAttributes);
+            // Methods declaring services after the message are wrapped by
+            // MethodHandlerArgumentsPass; batch handlers keep their native
+            // ($message, Acknowledger) signature and stay on Symfony's path.
+            $needsExtraArguments = null !== $handlerMethod
+                && \count($handlerMethod->getParameters()) > 1
+                && null !== $handlerClass
+                && !$handlerClass->implementsInterface(BatchHandlerInterface::class);
+
+            $definition->addTag($needsExtraArguments ? 'messenger_workflow.method_handler' : 'messenger.message_handler', $tagAttributes);
         });
     }
 }

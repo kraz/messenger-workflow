@@ -367,6 +367,33 @@ final class BookRegisteredHandler
 }
 ```
 
+The attributes also work on methods, and a handler method may declare extra parameters
+after the message — they are resolved from the container with full autowiring semantics
+(`#[Autowire]`/`#[Target]` included; nullable parameters degrade to null when no service
+matches, defaults are kept). This lets a controller class host its feature's handler
+without constructor injection:
+
+```php
+#[AsController]
+final class RegisterBookController
+{
+    #[Route(path: '/register', methods: ['POST'])]
+    public function registerBook(#[MapRequestPayload] RegisterBookRequest $request, CommandBusInterface $commandBus): void
+    {
+        $commandBus->dispatch(RegisterBookCommand::fromRequest($request));
+    }
+
+    #[AsCommandHandler]
+    public function registerBookHandler(RegisterBookCommand $command, BookRepositoryInterface $books): void
+    {
+        $books->add(Book::register($command));
+    }
+}
+```
+
+(Batch handlers keep Symfony's native `($message, Acknowledger)` signature and are
+never wrapped.)
+
 Domain events are published through the context's outbox bus (atomic with the domain
 transaction) or directly to the event bus (immediate, less resilient):
 
