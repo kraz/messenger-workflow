@@ -246,8 +246,10 @@ The journey, hop by hop:
    side effects; `ExactlyOneHandlerMiddleware` enforces exactly one handler. Then, inside
    the one transaction: the handler runs (application writes on the same connection join
    it), the handler's return value is wrapped into a `CommandCompletedNotification` and
-   inserted into the notifier outbox, the inbox row is deleted and its dedup entry marked
-   processed — **one atomic commit** for all of it.
+   inserted into the notifier outbox, the entity managers on that connection are flushed
+   (the unit of work the handler did not have to close itself — disable with
+   `messenger_workflow.messenger.transaction.flush_entity_managers: false`), the inbox row
+   is deleted and its dedup entry marked processed — **one atomic commit** for all of it.
 
    On failure everything rolls back and the command retry policy decides: transient
    infrastructure errors retry with backoff (the delay is applied as `available_at` on

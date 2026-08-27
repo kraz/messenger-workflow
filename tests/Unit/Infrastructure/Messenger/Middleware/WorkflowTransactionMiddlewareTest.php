@@ -7,6 +7,7 @@ namespace Kraz\MessengerWorkflow\Tests\Unit\Infrastructure\Messenger\Middleware;
 use Contracts\Demo\Command\DoSomethingCommand;
 use Doctrine\DBAL\Connection as DbalConnection;
 use Doctrine\DBAL\DriverManager;
+use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\Persistence\ManagerRegistry;
 use Doctrine\Persistence\ObjectManager;
 use Doctrine\Persistence\ObjectRepository;
@@ -33,6 +34,21 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 final class WorkflowTransactionMiddlewareTest extends TestCase
 {
     private DbalConnection $dbal;
+    private DbalConnection $otherDbal;
+
+    /**
+     * Entity managers handed to the fake registry, by name.
+     *
+     * @var array<string, EntityManagerInterface>
+     */
+    private array $managers = [];
+
+    /**
+     * Transaction state observed by each manager when it was flushed.
+     *
+     * @var array<string, bool>
+     */
+    private array $flushed = [];
 
     /**
      * Transaction state observed inside the handler.
@@ -42,14 +58,22 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
     protected function setUp(): void
     {
         $this->dbal = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
+        $this->otherDbal = DriverManager::getConnection(['driver' => 'pdo_sqlite', 'memory' => true]);
         $this->handlerSawTransaction = null;
+        $this->managers = [];
+        $this->flushed = [];
     }
 
     private function doctrine(): ManagerRegistry
     {
-        return new class($this->dbal) implements ManagerRegistry {
-            public function __construct(private readonly DbalConnection $connection)
-            {
+        return new class($this->dbal, $this->managers) implements ManagerRegistry {
+            /**
+             * @param array<string, ObjectManager> $managers
+             */
+            public function __construct(
+                private readonly DbalConnection $connection,
+                private readonly array $managers,
+            ) {
             }
 
             public function getDefaultConnectionName(): string
@@ -85,7 +109,7 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
 
             public function getManager(?string $name = null): ObjectManager
             {
-                throw new \InvalidArgumentException('No managers configured.');
+                return $this->managers[$name ?? 'app'] ?? throw new \InvalidArgumentException(\sprintf('Unknown manager "%s".', (string) $name));
             }
 
             /**
@@ -93,7 +117,7 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
              */
             public function getManagers(): array
             {
-                return [];
+                return $this->managers;
             }
 
             public function resetManager(?string $name = null): ObjectManager
@@ -106,7 +130,10 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
              */
             public function getManagerNames(): array
             {
-                return [];
+                return array_combine(
+                    array_keys($this->managers),
+                    array_map(static fn (string $name): string => 'doctrine.orm.'.$name.'_entity_manager', array_keys($this->managers)),
+                );
             }
 
             /**
@@ -129,9 +156,9 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
     /**
      * @param array<string, array<string, string>> $queueOrmBinding
      */
-    private function bus(array $queueOrmBinding, ?\Throwable $handlerFailure = null): MessageBus
+    private function bus(array $queueOrmBinding, ?\Throwable $handlerFailure = null, bool $flushEntityManagers = true): MessageBus
     {
-        $middleware = new WorkflowTransactionMiddleware(new WorkflowTransportRegistry(), $queueOrmBinding, $this->doctrine());
+        $middleware = new WorkflowTransactionMiddleware(new WorkflowTransportRegistry(), $queueOrmBinding, $this->doctrine(), $flushEntityManagers);
         $handler = new class($this->dbal, $handlerFailure, function (bool $inTransaction): void { $this->handlerSawTransaction = $inTransaction; }) implements MiddlewareInterface {
             public function __construct(
                 private readonly DbalConnection $dbal,
@@ -211,5 +238,97 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
             ->dispatch(new Envelope(new DoSomethingCommand('p')));
 
         self::assertFalse($this->handlerSawTransaction);
+    }
+
+    /**
+     * Registers an entity manager on the given connection, recording whether the
+     * transaction was still open when it was flushed.
+     */
+    private function manager(string $name, DbalConnection $connection, ?\Throwable $flushFailure = null): void
+    {
+        $manager = self::createStub(EntityManagerInterface::class);
+        $manager->method('isOpen')->willReturn(true);
+        $manager->method('getConnection')->willReturn($connection);
+        $manager->method('flush')->willReturnCallback(function () use ($name, $flushFailure): void {
+            $this->flushed[$name] = $this->dbal->isTransactionActive();
+            if (null !== $flushFailure) {
+                throw $flushFailure;
+            }
+        });
+
+        $this->managers[$name] = $manager;
+    }
+
+    public function testTheTransactionFlushesTheEntityManagersOnItsConnection(): void
+    {
+        $this->manager('app', $this->dbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']])
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+
+        self::assertSame(['app' => true], $this->flushed, 'The manager was flushed INSIDE the transaction');
+        self::assertFalse($this->dbal->isTransactionActive(), 'The transaction was committed');
+    }
+
+    public function testManagersOnOtherConnectionsAreLeftAlone(): void
+    {
+        $this->manager('app', $this->dbal);
+        $this->manager('other', $this->otherDbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']])
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+
+        self::assertSame(['app' => true], $this->flushed, 'Only the transaction\'s own context is flushed');
+    }
+
+    public function testTheFlushCanBeTurnedOff(): void
+    {
+        $this->manager('app', $this->dbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']], flushEntityManagers: false)
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+
+        self::assertSame([], $this->flushed, 'flush_entity_managers: false leaves writing to the application');
+        self::assertFalse($this->dbal->isTransactionActive(), 'The transaction still commits');
+    }
+
+    public function testAFailingFlushRollsTheTransactionBack(): void
+    {
+        $failure = new \RuntimeException('flush blew up');
+        $this->manager('app', $this->dbal, $failure);
+
+        try {
+            $this->bus(['commands' => ['app_commands' => 'app']])
+                ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+            self::fail('The flush failure must bubble up');
+        } catch (\RuntimeException $exception) {
+            self::assertSame($failure, $exception);
+        }
+
+        self::assertFalse($this->dbal->isTransactionActive(), 'The transaction was rolled back');
+    }
+
+    public function testAnUnmappedQueueFlushesNothing(): void
+    {
+        $this->manager('app', $this->dbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']])
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'other_queue'));
+
+        self::assertSame([], $this->flushed);
+    }
+
+    /**
+     * A dispatch carries no ReceivedStamp — which is what stops the outbox, itself
+     * published from inside a flush, from re-entering flush() through this middleware.
+     */
+    public function testASenderSideDispatchFlushesNothing(): void
+    {
+        $this->manager('app', $this->dbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']])
+            ->dispatch(new Envelope(new DoSomethingCommand('p')));
+
+        self::assertSame([], $this->flushed);
     }
 }

@@ -158,6 +158,16 @@ class MessengerWorkflowBundle extends AbstractBundle
                                 ->end()
                             ->end()
                         ->end()
+                        ->arrayNode('transaction')
+                            ->addDefaultsIfNotSet()
+                            ->info('The message transaction boundary opened by "messenger_workflow.transaction_middleware".')
+                            ->children()
+                                ->booleanNode('flush_entity_managers')
+                                    ->defaultTrue()
+                                    ->info('Flush every open entity manager running on the transaction\'s connection before committing, so handlers need not flush themselves. Turn off to leave writing entirely to the application.')
+                                ->end()
+                            ->end()
+                        ->end()
                         ->arrayNode('defaults')
                             ->addDefaultsIfNotSet()
                             ->children()
@@ -352,11 +362,14 @@ class MessengerWorkflowBundle extends AbstractBundle
             }
         }
 
+        $transactionConfig = \is_array($config['messenger'] ?? null) && \is_array($config['messenger']['transaction'] ?? null) ? $config['messenger']['transaction'] : [];
+
         $services->set('messenger_workflow.transaction_middleware')
             ->class(WorkflowTransactionMiddleware::class)
             ->arg('$transportRegistry', service('messenger_workflow.transport_registry'))
             ->arg('$queueOrmBinding', $queueOrmBinding)
-            ->arg('$doctrine', service('doctrine')->nullOnInvalid());
+            ->arg('$doctrine', service('doctrine')->nullOnInvalid())
+            ->arg('$flushEntityManagers', (bool) ($transactionConfig['flush_entity_managers'] ?? true));
 
         $services->set('messenger_workflow.command_notifier_middleware')
             ->class(CommandNotifierMiddleware::class)

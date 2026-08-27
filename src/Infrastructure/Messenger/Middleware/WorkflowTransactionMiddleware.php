@@ -30,16 +30,43 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
  * wraps the handlers — commit on success, rollback on failure. There is no dedup and
  * the broker ack happens outside the transaction (at-least-once): removing the inbox
  * is the user's informed trade-off, handlers must be idempotent.
+ *
+ * ## Closing the unit of work
+ *
+ * Opening the transaction is only half of a transaction boundary; the other half is
+ * telling Doctrine to write. Before returning, every **open ORM entity manager running
+ * on the transaction's connection** is flushed — inside the transaction, before the
+ * inbox row is removed. A handler therefore does not have to flush, and an ORM
+ * application gets a real unit of work per message: load aggregates, change them, and
+ * the boundary writes what changed. Anything a handler flushed itself simply leaves
+ * nothing for this flush to do.
+ *
+ * The connection is matched by **identity**, not by "has an active transaction": the
+ * inbox transport and the entity managers resolve the same
+ * `doctrine.dbal.<name>_connection` service, so this is exactly the set of managers
+ * taking part in *this* message's transaction. Managers of other bounded contexts —
+ * and managers running their own transactions, such as projection writers — are left
+ * alone.
+ *
+ * Turn it off with `messenger_workflow.messenger.transaction.flush_entity_managers: false`
+ * when the application flushes explicitly and wants no implicit write at the boundary.
+ *
+ * **Only received messages are wrapped**, which is also what keeps the flush safe:
+ * these buses are used to *dispatch* as well, and the outbox publishes through the event
+ * bus from inside a flush. A dispatch carries no {@see ReceivedStamp}, so it returns
+ * above without ever reaching `flush()` and cannot re-enter one.
  */
 class WorkflowTransactionMiddleware implements MiddlewareInterface
 {
     /**
-     * @param array<string, array<string, string>> $queueOrmBinding broker transport name → queue name → entity manager (or DBAL connection) name
+     * @param array<string, array<string, string>> $queueOrmBinding      broker transport name → queue name → entity manager (or DBAL connection) name
+     * @param bool                                 $flushEntityManagers whether to flush the transaction's entity managers before committing
      */
     public function __construct(
         private readonly WorkflowTransportRegistry $transportRegistry,
         private readonly array $queueOrmBinding = [],
         private readonly ?ManagerRegistry $doctrine = null,
+        private readonly bool $flushEntityManagers = true,
     ) {
     }
 
@@ -60,6 +87,8 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
             try {
                 $result = $stack->next()->handle($envelope, $stack);
 
+                $this->flushEntityManagersOf($mappedConnection);
+
                 $mappedConnection->commit();
 
                 return $result;
@@ -78,6 +107,10 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
         try {
             $result = $stack->next()->handle($envelope, $stack);
 
+            // Write the handler's pending ORM changes first: a failure here must leave
+            // the inbox row in place, so the message is retried rather than lost.
+            $this->flushEntityManagersOf($driverConnection);
+
             // Remove the inbox row (and mark the dedup index entry processed) inside
             // the very same transaction as the handler's application writes.
             $transport->ack($result);
@@ -91,6 +124,30 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
             }
 
             throw $exception;
+        }
+    }
+
+    /**
+     * Flushes the entity managers whose connection is the one this message's
+     * transaction was opened on.
+     */
+    private function flushEntityManagersOf(DbalConnection $connection): void
+    {
+        if (!$this->flushEntityManagers || null === $this->doctrine) {
+            return;
+        }
+
+        foreach ($this->doctrine->getManagers() as $manager) {
+            if (!$manager instanceof EntityManagerInterface) {
+                continue;
+            }
+            // A manager closed by an earlier failure cannot flush; leaving it to
+            // Doctrine keeps the original error as the reported one.
+            if (!$manager->isOpen() || $manager->getConnection() !== $connection) {
+                continue;
+            }
+
+            $manager->flush();
         }
     }
 

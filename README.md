@@ -487,6 +487,52 @@ or by the `check_delayed_interval` re-poll (default 60 s) when the transport is 
 standalone without the listener. Lower the matching interval on transports where precise
 backoff timing matters.
 
+## The unit of work at the transaction boundary
+
+`WorkflowTransactionMiddleware` opens the transaction around a received message — and
+closes the unit of work inside it. Before committing, every **open ORM entity manager
+running on that transaction's connection** is flushed, so an ORM application gets a real
+unit of work per message:
+
+```php
+#[AsCommandHandler]
+final readonly class CompleteAuditCommandHandler
+{
+    public function __invoke(CompleteAuditCommand $command): void
+    {
+        $audit = $this->audits->get($command->auditId);
+
+        $this->reconciliation->complete($audit, $command->completedBy, $this->clock->now());
+        // No flush, no save: the aggregates are managed, and the boundary writes them.
+    }
+}
+```
+
+A handler that flushes itself is unaffected — the boundary flush then finds nothing to do.
+The write happens **before the inbox row is removed**, so a failing flush leaves the message
+in the inbox and the whole transaction rolls back: the message is retried, never silently
+lost.
+
+Managers are selected by **connection identity**, not by "has an open transaction": the
+inbox transport and the entity managers resolve the same `doctrine.dbal.<name>_connection`
+service, so this is exactly the set of managers taking part in *this* message's
+transaction. Other bounded contexts, and managers running their own transactions (a
+projection writer, say), are untouched.
+
+Only *received* messages are wrapped, which is also what makes the flush safe to do here:
+a sender-side `dispatch()` carries no `ReceivedStamp` and returns before reaching the
+flush — including the outbox's own dispatch, which happens from inside a flush and would
+otherwise re-enter one.
+
+Turn it off to leave writing entirely to the application:
+
+```yaml
+messenger_workflow:
+    messenger:
+        transaction:
+            flush_entity_managers: false   # default: true
+```
+
 ## Failure transports (DLQ) and replays
 
 Inbox deduplication covers **broker redelivery only**: a message UUID already recorded as
