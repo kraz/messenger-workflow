@@ -73,3 +73,30 @@ rejection stamps the index like an ack), so a dedup check would block all replay
 marker can distinguish "failed before applying side effects" from "failed after". See
 "Failure transports (DLQ) and replays" in the README for the operational contract
 (idempotent handlers, `transactional_handler=true`).
+
+## 4. The boundary flush selects entity managers by connection name, compiled ahead of time
+
+The message-boundary flush (`flush_entity_managers`, default on) no longer scans every
+registered entity manager at runtime comparing connection instances. A compiler pass
+(`ResolveTransactionEntityManagersPass`) builds a `connection name → entity managers`
+map from DoctrineBundle's container state, and the middleware flushes exactly the
+managers of the transaction's connection — one lookup per message. With many bounded
+contexts (one connection + entity manager each), the other contexts' managers are no
+longer instantiated per worker or iterated per message.
+
+This also removes a silent-loss edge: previously, an entity manager whose connection
+*instance* didn't match the transport's was skipped without a trace while the message
+was still acked. Now the flush set is fixed by configuration, a transactional inbox on
+a connection without any entity manager is flagged in the container's compiler log, and
+in `kernel.debug` a handler leaving scheduled changes in a manager outside the message
+transaction fails the message with a descriptive `LogicException` instead of losing the
+writes.
+
+For anyone wiring the internals programmatically (the bundle does all of this itself):
+
+- `WorkflowTransportRegistry::addInboxTransport()` gained an optional fourth parameter,
+  the transport's DBAL connection name; the inbox transport factories record it.
+- `WorkflowTransactionMiddleware` gained `$connectionEntityManagers` (the compiled map)
+  and `$debug` constructor parameters. Without the map, the boundary flush only covers
+  the entity manager explicitly named in `orm_mappings` — managers matched implicitly
+  by connection identity are not flushed anymore.

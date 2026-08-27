@@ -20,6 +20,7 @@ use Kraz\MessengerWorkflow\Infrastructure\Console\MessengerSupervisorConfigComma
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\ConfigureTransportsPass;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\DeriveWorkersPass;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\MethodHandlerArgumentsPass;
+use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\ResolveTransactionEntityManagersPass;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Failure\CommandsFailuresTransportFactory;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Failure\EventsFailuresTransportFactory;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Inbox\CommandsInboxTransportFactory;
@@ -69,6 +70,7 @@ use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
 use Symfony\Component\Messenger\Handler\BatchHandlerInterface;
 use Symfony\Component\Messenger\Retry\MultiplierRetryStrategy;
 
+use function Symfony\Component\DependencyInjection\Loader\Configurator\param;
 use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
 use function Symfony\Component\DependencyInjection\Loader\Configurator\tagged_iterator;
 
@@ -310,6 +312,7 @@ class MessengerWorkflowBundle extends AbstractBundle
         $container->addCompilerPass(new MethodHandlerArgumentsPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, 1);
         $container->addCompilerPass(new ConfigureTransportsPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
         $container->addCompilerPass(new DeriveWorkersPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
+        $container->addCompilerPass(new ResolveTransactionEntityManagersPass(), PassConfig::TYPE_BEFORE_OPTIMIZATION, -100);
     }
 
     public function prependExtension(ContainerConfigurator $container, ContainerBuilder $builder): void
@@ -369,7 +372,11 @@ class MessengerWorkflowBundle extends AbstractBundle
             ->arg('$transportRegistry', service('messenger_workflow.transport_registry'))
             ->arg('$queueOrmBinding', $queueOrmBinding)
             ->arg('$doctrine', service('doctrine')->nullOnInvalid())
-            ->arg('$flushEntityManagers', (bool) ($transactionConfig['flush_entity_managers'] ?? true));
+            ->arg('$flushEntityManagers', (bool) ($transactionConfig['flush_entity_managers'] ?? true))
+            // Replaced with the compiled `connection name → entity managers` map by
+            // ResolveTransactionEntityManagersPass.
+            ->arg('$connectionEntityManagers', [])
+            ->arg('$debug', param('kernel.debug'));
 
         $services->set('messenger_workflow.command_notifier_middleware')
             ->class(CommandNotifierMiddleware::class)

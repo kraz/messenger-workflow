@@ -513,11 +513,25 @@ The write happens **before the inbox row is removed**, so a failing flush leaves
 in the inbox and the whole transaction rolls back: the message is retried, never silently
 lost.
 
-Managers are selected by **connection identity**, not by "has an open transaction": the
-inbox transport and the entity managers resolve the same `doctrine.dbal.<name>_connection`
-service, so this is exactly the set of managers taking part in *this* message's
-transaction. Other bounded contexts, and managers running their own transactions (a
-projection writer, say), are untouched.
+Managers are selected by **connection name, resolved at container compile time**: the
+inbox transport and the entity managers both name their connection in configuration and
+resolve the same `doctrine.dbal.<name>_connection` service, so the compiled
+`connection name → entity managers` map is exactly the set of managers taking part in
+*this* message's transaction. Per message that is a single hash lookup — with dozens of
+bounded contexts, the other contexts' managers are never instantiated or scanned. Other
+bounded contexts, and managers running their own transactions (a projection writer,
+say), are untouched.
+
+Two guards catch the misconfiguration this map cannot repair — handlers writing through
+an entity manager on a *different* connection than the message transaction (such writes
+could never be atomic with the inbox-row removal):
+
+- **Compile time:** a transactional inbox transport whose connection has no entity
+  manager is flagged in the container's compiler log (fine for a DBAL-only context,
+  suspicious if that context uses the ORM).
+- **Debug mode** (`kernel.debug`): a handler that leaves scheduled (persisted/removed,
+  never flushed) entities in a manager outside the transaction fails the message with a
+  descriptive `LogicException` instead of silently dropping the writes on commit.
 
 Only *received* messages are wrapped, which is also what makes the flush safe to do here:
 a sender-side `dispatch()` carries no `ReceivedStamp` and returns before reaching the

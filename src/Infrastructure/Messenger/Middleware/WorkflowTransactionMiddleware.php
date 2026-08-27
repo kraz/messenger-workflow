@@ -34,19 +34,23 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
  * ## Closing the unit of work
  *
  * Opening the transaction is only half of a transaction boundary; the other half is
- * telling Doctrine to write. Before returning, every **open ORM entity manager running
- * on the transaction's connection** is flushed — inside the transaction, before the
+ * telling Doctrine to write. Before returning, every **ORM entity manager running on
+ * the transaction's connection** is flushed — inside the transaction, before the
  * inbox row is removed. A handler therefore does not have to flush, and an ORM
  * application gets a real unit of work per message: load aggregates, change them, and
  * the boundary writes what changed. Anything a handler flushed itself simply leaves
  * nothing for this flush to do.
  *
- * The connection is matched by **identity**, not by "has an active transaction": the
- * inbox transport and the entity managers resolve the same
- * `doctrine.dbal.<name>_connection` service, so this is exactly the set of managers
- * taking part in *this* message's transaction. Managers of other bounded contexts —
- * and managers running their own transactions, such as projection writers — are left
- * alone.
+ * The managers to flush are resolved **by connection name at container compile time**
+ * ({@see \Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\ResolveTransactionEntityManagersPass}):
+ * the inbox transport and the entity managers both name their connection in
+ * configuration and resolve the same `doctrine.dbal.<name>_connection` service, so the
+ * compiled `connection name → entity manager names` map is exactly the set of managers
+ * taking part in *this* message's transaction. Per message that is one hash lookup —
+ * the other bounded contexts' managers are never instantiated, never scanned, and (as
+ * with managers running their own transactions, such as projection writers) left
+ * alone. In debug mode, a manager OUTSIDE that set left holding scheduled changes at
+ * the boundary fails the message loudly instead of losing the writes silently.
  *
  * Turn it off with `messenger_workflow.messenger.transaction.flush_entity_managers: false`
  * when the application flushes explicitly and wants no implicit write at the boundary.
@@ -59,14 +63,18 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 class WorkflowTransactionMiddleware implements MiddlewareInterface
 {
     /**
-     * @param array<string, array<string, string>> $queueOrmBinding      broker transport name → queue name → entity manager (or DBAL connection) name
-     * @param bool                                 $flushEntityManagers whether to flush the transaction's entity managers before committing
+     * @param array<string, array<string, string>> $queueOrmBinding          broker transport name → queue name → entity manager (or DBAL connection) name
+     * @param bool                                 $flushEntityManagers      whether to flush the transaction's entity managers before committing
+     * @param array<string, list<string>>          $connectionEntityManagers DBAL connection name → names of the entity managers on it, compiled by ResolveTransactionEntityManagersPass
+     * @param bool                                 $debug                    fail the message when a handler leaves scheduled changes in an entity manager outside the transaction (kernel.debug)
      */
     public function __construct(
         private readonly WorkflowTransportRegistry $transportRegistry,
         private readonly array $queueOrmBinding = [],
         private readonly ?ManagerRegistry $doctrine = null,
         private readonly bool $flushEntityManagers = true,
+        private readonly array $connectionEntityManagers = [],
+        private readonly bool $debug = false,
     ) {
     }
 
@@ -78,16 +86,18 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
             : null;
 
         if (null === $transport) {
-            $mappedConnection = null !== $transportName ? $this->resolveMappedConnection($envelope, $transportName) : null;
-            if (null === $mappedConnection) {
+            $mapped = null !== $transportName ? $this->resolveMappedTransaction($envelope, $transportName) : null;
+            if (null === $mapped) {
                 return $stack->next()->handle($envelope, $stack);
             }
+            [$mappedConnection, $managerNames] = $mapped;
 
             $mappedConnection->beginTransaction();
             try {
                 $result = $stack->next()->handle($envelope, $stack);
 
-                $this->flushEntityManagersOf($mappedConnection);
+                $this->flushManagers($managerNames);
+                $this->assertNoPendingChangesOutsideTransaction($managerNames, $transportName);
 
                 $mappedConnection->commit();
 
@@ -102,6 +112,9 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
         }
 
         $driverConnection = $transport->getConnection()->getDriverConnection();
+        $connectionName = $this->transportRegistry->getInboxConnectionName($transportName)
+            ?? $this->resolveConnectionName($driverConnection);
+        $managerNames = null !== $connectionName ? ($this->connectionEntityManagers[$connectionName] ?? []) : [];
 
         $driverConnection->beginTransaction();
         try {
@@ -109,7 +122,8 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
 
             // Write the handler's pending ORM changes first: a failure here must leave
             // the inbox row in place, so the message is retried rather than lost.
-            $this->flushEntityManagersOf($driverConnection);
+            $this->flushManagers($managerNames);
+            $this->assertNoPendingChangesOutsideTransaction($managerNames, $transportName);
 
             // Remove the inbox row (and mark the dedup index entry processed) inside
             // the very same transaction as the handler's application writes.
@@ -128,30 +142,80 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
     }
 
     /**
-     * Flushes the entity managers whose connection is the one this message's
-     * transaction was opened on.
+     * @param list<string> $managerNames
      */
-    private function flushEntityManagersOf(DbalConnection $connection): void
+    private function flushManagers(array $managerNames): void
     {
         if (!$this->flushEntityManagers || null === $this->doctrine) {
             return;
         }
 
-        foreach ($this->doctrine->getManagers() as $manager) {
-            if (!$manager instanceof EntityManagerInterface) {
-                continue;
-            }
+        foreach ($managerNames as $managerName) {
+            $manager = $this->doctrine->getManager($managerName);
             // A manager closed by an earlier failure cannot flush; leaving it to
             // Doctrine keeps the original error as the reported one.
-            if (!$manager->isOpen() || $manager->getConnection() !== $connection) {
-                continue;
+            if ($manager instanceof EntityManagerInterface && $manager->isOpen()) {
+                $manager->flush();
             }
-
-            $manager->flush();
         }
     }
 
-    private function resolveMappedConnection(Envelope $envelope, string $transportName): ?DbalConnection
+    /**
+     * Fallback for inbox transports registered without their connection name
+     * (programmatic setups): the name whose registry connection is this instance.
+     */
+    private function resolveConnectionName(DbalConnection $connection): ?string
+    {
+        if (null === $this->doctrine) {
+            return null;
+        }
+
+        foreach ($this->doctrine->getConnections() as $name => $candidate) {
+            if ($candidate === $connection) {
+                return $name;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Debug-only tripwire for the silent-loss edge the compiled map cannot cover: a
+     * handler that persisted or removed entities through a manager on ANOTHER
+     * connection. Those changes are outside the message transaction, nothing flushes
+     * them later in a worker, and the commit would drop them silently — so the message
+     * fails (and rolls back) with the misconfiguration spelled out instead. Detection
+     * is intentionally cheap: persist/remove schedule immediately; dirty updates of
+     * managed entities would require computing changesets, too intrusive even for dev.
+     *
+     * @param list<string> $flushedManagerNames
+     */
+    private function assertNoPendingChangesOutsideTransaction(array $flushedManagerNames, string $transportName): void
+    {
+        if (!$this->debug || !$this->flushEntityManagers || null === $this->doctrine) {
+            return;
+        }
+
+        foreach ($this->doctrine->getManagers() as $name => $manager) {
+            if (\in_array($name, $flushedManagerNames, true) || !$manager instanceof EntityManagerInterface || !$manager->isOpen()) {
+                continue;
+            }
+
+            $unitOfWork = $manager->getUnitOfWork();
+            if ([] === $unitOfWork->getScheduledEntityInsertions()
+                && [] === $unitOfWork->getScheduledEntityUpdates()
+                && [] === $unitOfWork->getScheduledEntityDeletions()) {
+                continue;
+            }
+
+            throw new \LogicException(\sprintf('A handler of a message from transport "%s" left scheduled changes in entity manager "%s", which runs on a different connection than the message transaction — committing would silently drop them. Move the writes to an entity manager on the transaction\'s connection, or flush "%s" explicitly in the handler.', $transportName, $name, $name));
+        }
+    }
+
+    /**
+     * @return array{0: DbalConnection, 1: list<string>}|null the connection to wrap the handlers in, and the entity manager names to flush at the boundary
+     */
+    private function resolveMappedTransaction(Envelope $envelope, string $transportName): ?array
     {
         if ([] === $this->queueOrmBinding || null === $this->doctrine) {
             return null;
@@ -168,16 +232,32 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
         if (\array_key_exists($mapped, $this->doctrine->getManagerNames())) {
             $manager = $this->doctrine->getManager($mapped);
             if ($manager instanceof EntityManagerInterface) {
-                return $manager->getConnection();
+                // The explicitly mapped manager is flushed even when absent from the
+                // compiled map — the mapping IS the configuration; managers sharing
+                // its connection join it through the map.
+                $connectionName = $this->connectionNameOfManager($mapped);
+
+                return [$manager->getConnection(), null !== $connectionName ? $this->connectionEntityManagers[$connectionName] : [$mapped]];
             }
         }
         if (\array_key_exists($mapped, $this->doctrine->getConnectionNames())) {
             $connection = $this->doctrine->getConnection($mapped);
             if ($connection instanceof DbalConnection) {
-                return $connection;
+                return [$connection, $this->connectionEntityManagers[$mapped] ?? []];
             }
         }
 
         throw new UnrecoverableMessageHandlingException(\sprintf('orm_mappings maps queue "%s" to "%s", which is neither a Doctrine entity manager nor a DBAL connection name.', $queueName ?? '', $mapped));
+    }
+
+    private function connectionNameOfManager(string $managerName): ?string
+    {
+        foreach ($this->connectionEntityManagers as $connectionName => $managerNames) {
+            if (\in_array($managerName, $managerNames, true)) {
+                return $connectionName;
+            }
+        }
+
+        return null;
     }
 }

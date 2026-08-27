@@ -8,6 +8,7 @@ use Contracts\Demo\Command\DoSomethingCommand;
 use Doctrine\DBAL\Connection as DbalConnection;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\UnitOfWork;
 use Doctrine\Persistence\ManagerRegistry;
 use Doctrine\Persistence\ObjectManager;
 use Doctrine\Persistence\ObjectRepository;
@@ -154,11 +155,33 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
     }
 
     /**
-     * @param array<string, array<string, string>> $queueOrmBinding
+     * The compiled `connection name → entity manager names` map the compiler pass
+     * would produce for the registered managers: the ones on the 'app' connection.
+     *
+     * @return array<string, list<string>>
      */
-    private function bus(array $queueOrmBinding, ?\Throwable $handlerFailure = null, bool $flushEntityManagers = true): MessageBus
+    private function compiledConnectionMap(): array
     {
-        $middleware = new WorkflowTransactionMiddleware(new WorkflowTransportRegistry(), $queueOrmBinding, $this->doctrine(), $flushEntityManagers);
+        return ['app' => array_keys(array_filter(
+            $this->managers,
+            fn (EntityManagerInterface $manager): bool => $manager->getConnection() === $this->dbal,
+        ))];
+    }
+
+    /**
+     * @param array<string, array<string, string>>  $queueOrmBinding
+     * @param array<string, list<string>>|null      $connectionEntityManagers null = the map the compiler pass would compile
+     */
+    private function bus(array $queueOrmBinding, ?\Throwable $handlerFailure = null, bool $flushEntityManagers = true, ?array $connectionEntityManagers = null, bool $debug = false): MessageBus
+    {
+        $middleware = new WorkflowTransactionMiddleware(
+            new WorkflowTransportRegistry(),
+            $queueOrmBinding,
+            $this->doctrine(),
+            $flushEntityManagers,
+            $connectionEntityManagers ?? $this->compiledConnectionMap(),
+            $debug,
+        );
         $handler = new class($this->dbal, $handlerFailure, function (bool $inTransaction): void { $this->handlerSawTransaction = $inTransaction; }) implements MiddlewareInterface {
             public function __construct(
                 private readonly DbalConnection $dbal,
@@ -330,5 +353,65 @@ final class WorkflowTransactionMiddlewareTest extends TestCase
             ->dispatch(new Envelope(new DoSomethingCommand('p')));
 
         self::assertSame([], $this->flushed);
+    }
+
+    /**
+     * The explicit orm_mappings target is authoritative: it is flushed even when the
+     * compiled `connection → managers` map does not know it (e.g. programmatic setups
+     * where the compiler pass never ran) — never silently skipped.
+     */
+    public function testAMappedManagerAbsentFromTheCompiledMapIsStillFlushed(): void
+    {
+        $this->manager('app', $this->dbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']], connectionEntityManagers: [])
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+
+        self::assertSame(['app' => true], $this->flushed, 'The mapped manager was flushed inside the transaction');
+    }
+
+    /**
+     * Registers an entity manager on the given connection whose unit of work holds a
+     * scheduled (persisted but never flushed) entity.
+     */
+    private function managerWithScheduledInsertions(string $name, DbalConnection $connection): void
+    {
+        $unitOfWork = self::createStub(UnitOfWork::class);
+        $unitOfWork->method('getScheduledEntityInsertions')->willReturn([new \stdClass()]);
+
+        $manager = self::createStub(EntityManagerInterface::class);
+        $manager->method('isOpen')->willReturn(true);
+        $manager->method('getConnection')->willReturn($connection);
+        $manager->method('getUnitOfWork')->willReturn($unitOfWork);
+
+        $this->managers[$name] = $manager;
+    }
+
+    public function testDebugModeFailsTheMessageWhenAForeignManagerHoldsScheduledChanges(): void
+    {
+        $this->manager('app', $this->dbal);
+        $this->managerWithScheduledInsertions('other', $this->otherDbal);
+
+        try {
+            $this->bus(['commands' => ['app_commands' => 'app']], debug: true)
+                ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+            self::fail('The foreign pending changes must fail the message');
+        } catch (\LogicException $exception) {
+            self::assertStringContainsString('entity manager "other"', $exception->getMessage());
+        }
+
+        self::assertFalse($this->dbal->isTransactionActive(), 'The transaction was rolled back');
+    }
+
+    public function testDebugModeLetsCleanForeignManagersPass(): void
+    {
+        $this->manager('app', $this->dbal);
+        $this->manager('other', $this->otherDbal);
+
+        $this->bus(['commands' => ['app_commands' => 'app']], debug: true)
+            ->dispatch($this->receivedFromBrokerQueue('commands', 'app_commands'));
+
+        self::assertSame(['app' => true], $this->flushed, 'Only the transaction\'s own context is flushed');
+        self::assertFalse($this->dbal->isTransactionActive(), 'The transaction was committed');
     }
 }

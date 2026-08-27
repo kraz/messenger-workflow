@@ -100,7 +100,13 @@ class InboxTransportFactory implements TransportFactoryInterface
         $transport = new InboxTransport($connection, $serializer);
 
         if (null !== $transportName) {
-            $this->transportRegistry?->addInboxTransport($transportName, $transport, $transactionalHandler);
+            // Record the resolved connection NAME: the transaction middleware selects the
+            // entity managers to flush at the message boundary through the compile-time
+            // `connection name → entity managers` map, never by scanning instances.
+            $connectionName = \is_string($configuration['connection'] ?? null) && '' !== $configuration['connection']
+                ? $configuration['connection']
+                : $this->registry->getDefaultConnectionName();
+            $this->transportRegistry?->addInboxTransport($transportName, $transport, $transactionalHandler, $connectionName);
         }
 
         return $transport;

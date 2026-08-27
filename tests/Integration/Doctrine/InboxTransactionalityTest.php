@@ -298,10 +298,10 @@ final class InboxTransactionalityTest extends TestCase
     {
         $envelope = $this->receiveOne();
         $registry = new WorkflowTransportRegistry();
-        $registry->addInboxTransport(self::TRANSPORT_NAME, $this->transport, true);
+        $registry->addInboxTransport(self::TRANSPORT_NAME, $this->transport, true, 'app');
 
         $bus = new MessageBus([
-            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $this->flushingManager($this->dbal, 'flushed')])),
+            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $this->flushingManager($this->dbal, 'flushed')]), true, ['app' => ['app']]),
             // The handler writes nothing itself — the unit of work is closed for it.
             $this->handlerMiddleware(function (): void {
                 self::assertSame(0, $this->observedAppRows(), 'Nothing is written before the boundary flush');
@@ -326,7 +326,7 @@ final class InboxTransactionalityTest extends TestCase
         $manager->method('flush')->willThrowException(new \RuntimeException('flush failed'));
 
         $bus = new MessageBus([
-            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $manager])),
+            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $manager]), true, ['app' => ['app']]),
             $this->handlerMiddleware(function (): void {
                 $this->dbal->executeStatement(\sprintf('INSERT INTO "%s" (payload) VALUES (?)', $this->appTableName), ['doomed']);
             }),
@@ -350,7 +350,7 @@ final class InboxTransactionalityTest extends TestCase
         $registry->addInboxTransport(self::TRANSPORT_NAME, $this->transport, true);
 
         $bus = new MessageBus([
-            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $this->flushingManager($this->dbal, 'never')]), false),
+            new WorkflowTransactionMiddleware($registry, [], $this->doctrine(['app' => $this->flushingManager($this->dbal, 'never')]), false, ['app' => ['app']]),
             $this->handlerMiddleware(static function (): void {}),
         ]);
 
