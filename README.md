@@ -9,7 +9,8 @@ It is the messaging backbone for a modular monolith whose bounded contexts (modu
 only asynchronously — so they can later be split into independently deployed applications without
 touching application code.
 
-Upgrading from 0.2.x? Read **[UPGRADE-0.3.md](UPGRADE-0.3.md)**.
+Upgrading? Read **[UPGRADE-0.5.md](UPGRADE-0.5.md)** (and [UPGRADE-0.4.md](UPGRADE-0.4.md),
+[UPGRADE-0.3.md](UPGRADE-0.3.md) for older releases).
 
 ## Message model
 
@@ -74,6 +75,11 @@ commands and what happens at each hop — in **[MESSAGE_FLOWS.md](MESSAGE_FLOWS.
   message FQCN (`Contracts\*` = public contract, everything else `internal.<Context>`); queue
   binding keys derived from the queue owner and the `#[AsEventHandler(fromTransport: ...)]`
   handler declarations.
+- **Dedicated queues (routes)**: send chosen command or query classes of a context to a queue of
+  their own — e.g. a single-consumer FIFO lane for ordering-sensitive commands next to the
+  competing regular queue — by listing them on the queue binding (`route` + `messages`) or marking
+  them with `#[MessageRoute]`. Exclusive by construction (the routing key carries the route), with
+  its own inbox table, workers and DLQ, sharing the context's notifier.
 - **Multi-database support**: one database per bounded context; the DSN host of every
   outbox/inbox transport is the Doctrine DBAL connection name, so the owning database is always
   inferable from the transport.
@@ -181,8 +187,16 @@ messenger_workflow:
                 # the topic exchange, public + internal key on direct exchanges), the
                 # #[AsEventHandler(fromTransport: ...)] handler declarations (topic
                 # exchange only) and the explicit "binding_keys" list.
+                # Direct exchanges only: "route" makes the queue a dedicated queue that
+                # receives ONLY the classes listed under "messages" (or marked with
+                # #[MessageRoute('<route>')]); it binds to the owner keys suffixed with
+                # the route. "notifier" (commands) names the outbox its tracked results
+                # go through — default: the notifier of the owner's regular queue;
+                # false: none, on purpose.
                 queue_bindings: []
                     # - { queue: book_store_commands, owner: BookStore }
+                    # - { queue: book_store_bulk, owner: BookStore, route: bulk,
+                    #     messages: ['App\BookStore\Application\Command\RebuildCatalog'] }
                     # - { queue: book_store_events, owner: BookStore,
                     #     binding_keys: ['Contracts\Billing\Event\InvoicePaid'] }
 
@@ -311,7 +325,7 @@ messenger_workflow:
 
 | Option                                         | Transports                 | Default                         | Meaning                                                                             |
 |------------------------------------------------|----------------------------|---------------------------------|-------------------------------------------------------------------------------------|
-| `table_name`                                   | outbox, inbox, failures    | `zz_commands_*` / `zz_events_*` | storage table (inbox dedup index table = `<table_name>_index`)                      |
+| `table_name`                                   | outbox, inbox, failures    | `zz_commands_*` / `zz_events_*` | storage table (inbox dedup index table = `<table_name>_index`). Defaults are per **scheme**: two inbox or outbox transports on one connection must not share a table — the container build fails if they do; the inbox of a routed queue defaults to `<scheme default>_<transport name>` |
 | `multiple_consumers`                           | inbox                      | commands `true`, events `false` | competing consumers via `FOR UPDATE SKIP LOCKED`                                    |
 | `strict_order`                                 | inbox, outbox              | `false`                         | request single-consumer FIFO; conflicts with `multiple_consumers` (boot-time error) |
 | `transactional_handler`                        | inbox                      | commands `true`, events `false` | run handlers inside the inbox-row-deleting transaction                              |
@@ -454,6 +468,40 @@ Generate the supervisord config:
 bin/console messenger:supervisor-config                               # stdout
 bin/console messenger:supervisor-config --output-dir=etc/supervisor   # one <group>.conf per group
 ```
+
+## Dedicated queues (routes)
+
+Selected command (or query) classes of a context can be sent to a queue of their own — the
+classic case is a **single-consumer FIFO lane** for ordering-sensitive commands next to the
+competing regular queue:
+
+```yaml
+framework:
+    messenger:
+        transports:
+            book_store_bulk:                               # inbox named after the routed queue
+                dsn: 'commands-inbox://book_store?strict_order=true'
+                failure_transport: book_store_bulk_failures
+            book_store_bulk_failures: 'commands-failures://book_store?queue_name=book_store_bulk'
+
+messenger_workflow:
+    messenger:
+        transports:
+            commands:
+                queue_bindings:
+                    - { queue: book_store_commands, owner: BookStore }
+                    - { queue: book_store_bulk, owner: BookStore, route: bulk,
+                        messages: ['App\BookStore\Application\Command\RebuildCatalog'] }
+```
+
+Routed classes get the routing key `commands.internal.BookStore.bulk` (or, marked with
+`#[MessageRoute('bulk')]`, no configuration entry at all) and reach only `book_store_bulk`;
+everything else keeps `commands.internal.BookStore`. The routed queue gets its own derived
+receiver and handler (`instances: 1` enforced on a `strict_order` inbox), its own inbox table
+(derived when not declared) and DLQ, and publishes tracked results through the context's
+existing `book_store_commands_notifier`. Every misconfiguration the bundle can detect fails
+the container build. The full walkthrough — routing keys, binding keys, ordering under
+failure, validation rules — is in [MESSAGE_FLOWS.md](MESSAGE_FLOWS.md#dedicated-queues--routes).
 
 ## Reducing the flow
 

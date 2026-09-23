@@ -167,4 +167,25 @@ final class DeriveWorkersPassTest extends TestCase
 
         self::assertIsArray($container->getParameter('messenger_workflow.workers'));
     }
+
+    public function testInstancesAboveOneOnARoutedStrictOrderInboxIsRefused(): void
+    {
+        // The routed FIFO queue: derived receiver + handler; scaling the handler to two
+        // processes would break the single-consumer guarantee the route exists for.
+        $container = $this->buildContainer(
+            ['app_commands' => 'commands-inbox://default', 'app_planning' => 'commands-inbox://default?strict_order=true&table_name=zz_planning'],
+            [['name' => 'app_planning handler', 'instances' => 2]],
+        );
+        $container->setParameter('messenger_workflow.messenger.transports', [
+            'commands' => ['queue_bindings' => [
+                'app_commands' => ['owner' => 'App'],
+                'app_planning' => ['owner' => 'App', 'route' => 'planning', 'messages' => ['X']],
+            ]],
+        ]);
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessageMatches('/"app_planning handler".*"instances: 2".*single-consumer transport "app_planning"/');
+
+        new DeriveWorkersPass()->process($container);
+    }
 }

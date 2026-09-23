@@ -247,7 +247,7 @@ class WorkflowTransactionMiddleware implements MiddlewareInterface
             }
         }
 
-        throw new UnrecoverableMessageHandlingException(\sprintf('orm_mappings maps queue "%s" to "%s", which is neither a Doctrine entity manager nor a DBAL connection name.', $queueName ?? '', $mapped));
+        throw new UnrecoverableMessageHandlingException(\sprintf('orm_mappings maps queue "%s" to "%s", which is neither a Doctrine entity manager nor a DBAL connection name.', $queueName, $mapped));
     }
 
     private function connectionNameOfManager(string $managerName): ?string

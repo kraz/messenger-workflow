@@ -165,4 +165,39 @@ final class WorkerSetDeriverTest extends TestCase
         self::assertCount(1, $workers);
         self::assertSame('Custom relay', $workers[0]['name']);
     }
+
+    public function testARoutedQueueDerivesItsOwnReceiverAndHandlerInTheContextsGroup(): void
+    {
+        $workers = $this->indexByName($this->deriver->derive(
+            self::BOOK_STORE_TRANSPORTS + ['book_store_planning' => 'commands-inbox://book_store?strict_order=true'],
+            [
+                'commands' => [
+                    'book_store_commands' => ['owner' => 'BookStore'],
+                    'book_store_planning' => ['owner' => 'BookStore', 'route' => 'planning', 'messages' => ['X']],
+                ],
+            ],
+        ));
+
+        self::assertCount(6, $workers, 'Publisher, notifier, 2 × (receiver + handler) — no notifier worker for the routed queue');
+        self::assertSame('command_receiver', $workers['book_store_planning receiver']['type']);
+        self::assertSame('book_store_planning', $workers['book_store_planning receiver']['queue']);
+        self::assertSame('command_handler', $workers['book_store_planning handler']['type']);
+        self::assertSame('book_store_planning', $workers['book_store_planning handler']['source']);
+        self::assertSame('book_store', $workers['book_store_planning handler']['group'], 'The routed workers join the group of the owner\'s regular queue');
+        self::assertSame('book_store', $workers['book_store_planning receiver']['group']);
+        self::assertArrayNotHasKey('instances', $workers['book_store_planning handler'], 'instances defaults to 1');
+    }
+
+    public function testARoutedQueryQueueJoinsTheContextsGroup(): void
+    {
+        $workers = $this->indexByName($this->deriver->derive([], [
+            'queries' => [
+                'book_store_queries' => ['owner' => 'BookStore'],
+                'book_store_reports' => ['owner' => 'BookStore', 'route' => 'reports', 'messages' => ['X']],
+            ],
+        ]));
+
+        self::assertSame('book_store', $workers['book_store_reports handler']['group']);
+        self::assertSame('book_store_reports', $workers['book_store_reports handler']['queue']);
+    }
 }

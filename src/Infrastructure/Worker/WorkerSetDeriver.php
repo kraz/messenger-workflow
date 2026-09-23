@@ -13,6 +13,10 @@ namespace Kraz\MessengerWorkflow\Infrastructure\Worker;
  * - broker queue without inbox  → single collapsed consumer worker (no-inbox mode)
  * - queries queue               → query handler worker
  *
+ * A routed queue (binding with `route`) derives its workers like any other bound
+ * queue; its supervisor group is the group of the owner's regular queue, so the
+ * dedicated workers stay next to the context's workers.
+ *
  * Manually configured workers (workflow.workers) override the derived set: an entry
  * matching a derived worker by NAME or by IDENTITY (type + source + queue) replaces
  * it — old fully-manual configurations therefore produce exactly their declared set.
@@ -103,7 +107,7 @@ final readonly class WorkerSetDeriver
             $bindings = \is_array($queueBindings[$broker] ?? null) ? $queueBindings[$broker] : [];
             foreach (array_keys($bindings) as $queue) {
                 $queue = (string) $queue;
-                $group = $this->contextOf($queue);
+                $group = $this->groupOf($queue, $bindings);
                 $hasInbox = $this->isInboxDsn($transportDsns[$queue] ?? '');
 
                 if ($hasInbox) {
@@ -141,7 +145,7 @@ final readonly class WorkerSetDeriver
             $queue = (string) $queue;
             $workers[] = WorkerTypeDefaults::apply([
                 'name' => $queue.' handler',
-                'group' => $this->contextOf($queue),
+                'group' => $this->groupOf($queue, $queryBindings),
                 'type' => 'query_handler',
                 'queue' => $queue,
             ]);
@@ -183,6 +187,29 @@ final readonly class WorkerSetDeriver
         return str_starts_with($dsn, 'inbox://')
             || str_starts_with($dsn, 'commands-inbox://')
             || str_starts_with($dsn, 'events-inbox://');
+    }
+
+    /**
+     * The supervisor group of a bound queue: the context prefix of its name — or, for
+     * a routed queue, of the regular queue of the same owner (a routed queue's name
+     * carries the route, not a role suffix: "warehouse_planning" belongs with "warehouse").
+     *
+     * @param array<array-key, mixed> $bindings queue => binding of one broker transport
+     */
+    private function groupOf(string $queue, array $bindings): string
+    {
+        $binding = \is_array($bindings[$queue] ?? null) ? $bindings[$queue] : [];
+        $route = $binding['route'] ?? null;
+        $owner = $binding['owner'] ?? null;
+        if (null !== $route && \is_string($owner)) {
+            foreach ($bindings as $otherQueue => $otherBinding) {
+                if (\is_array($otherBinding) && ($otherBinding['owner'] ?? null) === $owner && null === ($otherBinding['route'] ?? null)) {
+                    return $this->contextOf((string) $otherQueue);
+                }
+            }
+        }
+
+        return $this->contextOf($queue);
     }
 
     /**
