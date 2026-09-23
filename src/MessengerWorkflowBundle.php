@@ -36,6 +36,7 @@ use Kraz\MessengerWorkflow\Infrastructure\Messenger\CommandBus;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\EventBus;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\EventListener\MessageFailedEventListener;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\EventListener\PostgreSqlNotifyOnIdleListener;
+use Kraz\MessengerWorkflow\Infrastructure\Messenger\MessageRouteResolver;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\Middleware\AmqpRoutingMiddleware;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\Middleware\CommandNotifierMiddleware;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\Middleware\ExactlyOneHandlerMiddleware;
@@ -152,7 +153,7 @@ class MessengerWorkflowBundle extends AbstractBundle
                                         ->variablePrototype()->end()
                                     ->end()
                                     ->arrayNode('queue_bindings')
-                                        ->info('Queues of this broker transport: each entry declares the owning bounded context and optional explicit binding keys.')
+                                        ->info('Queues of this broker transport: each entry declares the owning bounded context and optional explicit binding keys. On direct exchanges an entry may declare a "route" (a dedicated queue receiving only the message classes listed under "messages" or marked with #[MessageRoute]) and, for commands, the "notifier" outbox it publishes tracked results through (default: the notifier of the owner\'s regular queue; false for none).')
                                         ->normalizeKeys(false)
                                         ->useAttributeAsKey('queue')
                                         ->variablePrototype()->end()
@@ -331,8 +332,15 @@ class MessengerWorkflowBundle extends AbstractBundle
 
         $services = $container->services();
 
+        // Routes (dedicated queues for selected command/query classes): the compiled
+        // `message class → route` map is set by ConfigureTransportsPass.
+        $services->set('messenger_workflow.message_route_resolver')
+            ->class(MessageRouteResolver::class)
+            ->arg('$routes', []);
+
         $services->set('messenger_workflow.amqp_stamp_factory')
-            ->class(AmqpStampFactory::class);
+            ->class(AmqpStampFactory::class)
+            ->arg('$routes', service('messenger_workflow.message_route_resolver'));
 
         $services->set('messenger_workflow.message_id_middleware')
             ->class(MessageIdMiddleware::class);
@@ -382,7 +390,9 @@ class MessengerWorkflowBundle extends AbstractBundle
             ->class(CommandNotifierMiddleware::class)
             ->arg('$receiverLocator', service('messenger.receiver_locator'))
             ->arg('$transportRegistry', service('messenger_workflow.transport_registry'))
-            ->arg('$resultStorage', service('messenger_workflow.result_storage'));
+            ->arg('$resultStorage', service('messenger_workflow.result_storage'))
+            // Routed queues → their context's notifier; compiled by ConfigureTransportsPass.
+            ->arg('$notifierByQueue', []);
 
         $services->set('messenger_workflow.result_notifier_middleware')
             ->class(ResultNotifierMiddleware::class)

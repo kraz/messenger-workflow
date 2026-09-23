@@ -23,6 +23,7 @@ connection `book_store`) and, where a second context is needed, a subscribing co
   - [Without inbox — direct queue consumption](#without-inbox--direct-queue-consumption)
   - [Without notifier](#without-notifier)
   - [Minimal — broker only](#minimal--broker-only)
+- [Dedicated queues — routes](#dedicated-queues--routes)
 - [Custom transports and queues](#custom-transports-and-queues)
 
 ## The moving parts
@@ -101,13 +102,17 @@ everything else is *internal* to its context:
 |--------------------------------------------|---------------|--------------------------------------------------|
 | `App\BookStore\Application\Command\RegisterBook` | direct  | `commands.internal.BookStore`                    |
 | `Contracts\BookStore\Command\RegisterBook` | direct        | `commands.BookStore`                             |
+| `App\BookStore\Application\Command\RebuildCatalog` — routed (`route: bulk`, see below) | direct | `commands.internal.BookStore.bulk` |
+| `Contracts\BookStore\Command\ImportBooks` — routed (`route: bulk`) | direct | `commands.BookStore.bulk`                 |
 | `App\BookStore\Domain\Event\BookRegistered`| topic         | `events.internal.BookStore.Domain.Event.BookRegistered` |
 | `Contracts\BookStore\Event\BookRegistered` | topic         | `events.BookStore.Event.BookRegistered`          |
 
-Direct exchanges route on the bounded-context segment only; the topic exchange keeps the
-full dotted path so subscribers can bind selectively. The middleware only stamps when the
-envelope carries no `AmqpStamp` yet — pre-stamping your own `AmqpStamp` gives you full
-control of the routing key.
+Direct exchanges route on the bounded-context segment only — plus one *route* segment for
+message classes assigned to a [dedicated queue](#dedicated-queues--routes); the topic
+exchange keeps the full dotted path so subscribers can bind selectively. The middleware
+only stamps when the envelope carries no `AmqpStamp` yet — pre-stamping your own
+`AmqpStamp` gives you full control of the routing key for a *direct* dispatch (it does not
+survive an outbox: the relay recomputes the key from the message class).
 
 **Binding keys** come from `messenger_workflow.messenger.transports.<broker>.queue_bindings`.
 Each entry declares a queue and its owning context; `ConfigureTransportsPass` computes the
@@ -121,6 +126,8 @@ messenger_workflow:
             commands:
                 queue_bindings:
                     - { queue: book_store_commands, owner: BookStore }
+                    - { queue: book_store_bulk, owner: BookStore, route: bulk,
+                        messages: ['App\BookStore\Application\Command\RebuildCatalog'] }
             events:
                 queue_bindings:
                     - { queue: book_store_events, owner: BookStore }
@@ -131,6 +138,7 @@ derives:
 | Queue                 | Binding keys                                                                                                         |
 |-----------------------|----------------------------------------------------------------------------------------------------------------------|
 | `book_store_commands` | `commands.BookStore` (public), `commands.internal.BookStore` (internal)                                               |
+| `book_store_bulk`     | `commands.BookStore.bulk`, `commands.internal.BookStore.bulk` — **and nothing else**: a routed queue never binds to the plain context keys |
 | `book_store_events`   | `events.internal.BookStore.#` (all own internal events) + one key per foreign event class handled with `#[AsEventHandler(fromTransport: 'book_store_events')]` + any explicit `binding_keys: [...]` |
 
 On the topic exchange the foreign-event keys are auto-derived from the handler
@@ -505,6 +513,137 @@ idempotency-is-your-problem messaging — the right shape for cheap, repeatable 
 (cache warmups, notifications, projections that overwrite), and the wrong one for
 "charge the customer".
 
+## Dedicated queues — routes
+
+A **route** sends chosen command (or query) classes of a bounded context to a queue of
+their own, relayed into an inbox of its own and handled by its own worker, while every
+other command of the context keeps going to the regular queue. The typical reason is
+ordering: the regular commands inbox competes (`SKIP LOCKED`, several handler processes),
+so two commands dispatched one after the other may be handled concurrently. A routed
+queue on a single-consumer FIFO inbox handles them strictly in dispatch order — without
+slowing the interactive commands down to one process.
+
+```
+before:  every BookStore command ─► book_store_commands ─► inbox ─► handler ×2 (competing)
+after:   RebuildCatalog, …        ─► book_store_bulk     ─► inbox ─► handler ×1 (FIFO)
+         every other command      ─► book_store_commands ─► inbox ─► handler ×2 (competing)
+```
+
+```yaml
+framework:
+    messenger:
+        transports:
+            book_store_commands:                       # the regular queue's inbox (unchanged)
+                dsn: 'commands-inbox://book_store'
+                failure_transport: book_store_commands_failures
+            book_store_commands_failures: 'commands-failures://book_store?queue_name=book_store_commands'
+            book_store_commands_notifier: 'commands-outbox://book_store?table_name=zz_commands_notifier'
+
+            book_store_bulk:                           # the routed queue's inbox — named after the queue
+                dsn: 'commands-inbox://book_store?strict_order=true'   # single-consumer FIFO
+                failure_transport: book_store_bulk_failures
+            # The failures transport may share zz_commands_failures: it filters by queue_name.
+            book_store_bulk_failures: 'commands-failures://book_store?queue_name=book_store_bulk'
+            # No book_store_bulk_notifier: tracked results go through book_store_commands_notifier.
+
+messenger_workflow:
+    messenger:
+        transports:
+            commands:
+                queue_bindings:
+                    - { queue: book_store_commands, owner: BookStore }
+                    - queue: book_store_bulk
+                      owner: BookStore
+                      route: bulk
+                      messages:
+                          - 'App\BookStore\Application\Command\RebuildCatalog'
+                          - 'App\BookStore\Application\Command\ImportBooks'
+```
+
+Alternatively, or additionally, mark the class instead of listing it — the attribute is
+inherited by subclasses and implementors:
+
+```php
+use Kraz\MessengerWorkflow\Application\Attribute\MessageRoute;
+
+#[MessageRoute('bulk')]
+final class RebuildCatalog implements CommandInterface { /* ... */ }
+```
+
+What the bundle does with it:
+
+1. **Routing key** — `AmqpStampFactory` resolves the class's route (the compiled
+   `messages` map first, then `#[MessageRoute]`; each along the class lineage: class,
+   parents, interfaces) and appends it: `commands.internal.BookStore.bulk`. Every other
+   class keeps `commands.internal.BookStore`. The direct exchange matches whole keys, so
+   the routed message reaches **only** `book_store_bulk` and the others **only**
+   `book_store_commands` — exclusivity by construction, and the same key whether the
+   message is dispatched straight to the broker or relayed from a command outbox (the
+   relay recomputes it from the same map — a message parked in an outbox across a deploy
+   is routed by the configuration current at relay time).
+2. **Binding keys** — the routed queue binds to `commands.BookStore.bulk` and
+   `commands.internal.BookStore.bulk` only (see the table above).
+3. **Workers** — a receiver and a handler are derived for `book_store_bulk` like for any
+   bound queue, in the supervisor group of the context. With `strict_order=true` the
+   handler is single-consumer: `instances > 1` on it fails the container build.
+   `cmd_extra_options` apply per worker as usual.
+4. **Inbox table** — a routed inbox declared without a `table_name` gets its own default,
+   the scheme default suffixed with the transport name (`zz_commands_inbox_book_store_bulk`).
+   Never the regular inbox's table: the inbox `get()` has no queue filter, and two inboxes
+   on one table would be one pile of rows consumed by both workers (see
+   [Storage tables](#storage-tables-are-per-transport) below).
+5. **Notifier** — a tracked routed command publishes its result through the notifier of
+   the context's regular queue (`book_store_commands_notifier`): one notifier outbox, one
+   notifier worker per context; the notifier carries no ordered work, so sharing it costs
+   the routed queue nothing. Resolution order: an explicit `notifier:` on the binding
+   (`false` = the reduced flow on purpose), else `<queue>_notifier` if you declared one,
+   else `<regular queue>_notifier`. A routed queue never *silently* falls back to writing
+   the result storage directly: without any notifier in the context it runs the same
+   reduced flow as the regular queue.
+6. **Validation** — the container build fails when: a class is assigned to two routes; a
+   listed class does not implement the broker's marker interface or belongs to another
+   context than the queue owner; the configuration and a `#[MessageRoute]` attribute
+   disagree; a route name is not a single routing-key segment; two queues of one owner
+   share a route, or two *unrouted* queues share an owner on a direct exchange (double
+   delivery); a routed queue has no regular queue of the same owner (every unrouted
+   command would be unroutable); the routed and the regular queue differ in inbox mode;
+   a route routes no class at all; an explicit notifier does not exist or lives on another
+   connection than the inbox; a `#[MessageRoute]` on a handled class names a route no
+   queue serves; `binding_keys` are combined with `route`; a route is declared on the
+   topic exchange.
+
+**Ordering under failure.** On a `strict_order=true` inbox a failing command that is
+retried keeps its place: the retry backoff is stamped as `available_at` on the row and
+the FIFO `get()` **blocks its successors** until it is due — later commands never overtake
+it. A permanent failure (or an exhausted budget) drains it to the failure transport and
+the queue resumes. Commands are not retried by default except for transient
+infrastructure errors (3 attempts within a 30 s budget), so the head of a planning queue
+is blocked for at most that budget. FIFO holds end to end only when every segment is
+single-consumer: dispatch through one outbox (its relay is always single-consumer), one
+receiver on the queue, and the routed inbox in FIFO mode; a replay from the failure
+transport is out of order by nature.
+
+**Queries** use the same mechanism: a `route` on a `queries` binding with
+`QueryInterface` classes under `messages` (or `#[MessageRoute]`) isolates, say, heavy
+reports from interactive reads on their own query handler worker.
+
+**Provisioning:** `messenger:setup-transports` declares the routed queue and its bindings.
+RabbitMQ bindings are additive — renaming or removing a route leaves the old binding on
+the queue until you unbind it (management UI or `rabbitmqadmin`).
+
+### Storage tables are per transport
+
+The workflow Doctrine transports default their table **per DSN scheme**: every
+`commands-inbox://<conn>` without an explicit `table_name` is `zz_commands_inbox`, every
+`commands-outbox://<conn>` is `zz_commands_outbox` (and `zz_events_*` for events). Two
+inbox or outbox transports on one connection declared without table names therefore
+silently share one table — one pile of rows consumed by both workers, one dedup index
+(a message id recorded by one transport is dropped by the other), one PostgreSQL
+`LISTEN/NOTIFY` channel. Since 0.5 the **container build fails** for such a pair, naming
+both transports and the table and suggesting a `table_name`; routed inboxes get a
+derived table automatically. Failure transports are exempt: the stock Doctrine transport
+filters by `queue_name` and is meant to be shared.
+
 ## Custom transports and queues
 
 The bundle's transports are ordinary `framework.messenger.transports` entries — you can
@@ -531,9 +670,11 @@ The workflow middleware still stamps the message id and (on AMQP transports) the
 key, so tracked results and dedup keep working wherever the flow re-joins the standard
 segments.
 
-**A custom queue on a broker exchange.** Add a `queue_bindings` entry with explicit
-binding keys — for example a slow-lane queue for one heavy command, consumed by its own
-worker so it never starves the context's main queue:
+**A custom queue on a broker exchange.** For a queue serving selected command or query
+classes of your own context, use a [route](#dedicated-queues--routes) — exclusive by
+construction, configured in one place, and it survives the outbox. The manual variant
+below still works for keys the derivation cannot express, for example a queue owned by
+a synthetic context:
 
 ```yaml
 messenger_workflow:
@@ -553,7 +694,9 @@ messenger_workflow:
 ```
 
 and route the heavy messages there with a pre-stamped routing key (the AMQP routing
-middleware never overwrites an existing `AmqpStamp`):
+middleware never overwrites an existing `AmqpStamp`). Note that the stamp is not
+transferable: a message dispatched into a command outbox loses it, and the relay
+recomputes the key from the class — which is why routes exist:
 
 ```php
 use Jwage\PhpAmqpLibMessengerBundle\Transport\AmqpStamp;
@@ -570,7 +713,10 @@ re-gain dedup and transactional handling.
 **What to remember:**
 
 - `TransportNamesStamp` picks the *transport* (exclusive, per dispatch).
-- `AmqpStamp` picks the *routing key* — and therefore the queue(s) — on the broker.
+- `AmqpStamp` picks the *routing key* — and therefore the queue(s) — on the broker, for a
+  direct dispatch only.
+- A `route` on a queue binding (with `messages` or `#[MessageRoute]`) picks the queue per
+  *message class*, exclusively, on every path to the broker.
 - `queue_bindings` declares the queue and what it listens to; `orm_mappings` restores a
   handler transaction where no inbox exists; the `<queue>_notifier` convention restores
   tracked-result outboxing.

@@ -6,6 +6,8 @@ namespace Kraz\MessengerWorkflow\Tests\Unit\Infrastructure\Messenger\Middleware;
 
 use Contracts\Demo\Command\DoSomethingCommand;
 use Doctrine\DBAL\DriverManager;
+use Jwage\PhpAmqpLibMessengerBundle\Transport\AmqpEnvelope;
+use Jwage\PhpAmqpLibMessengerBundle\Transport\AmqpReceivedStamp;
 use Kraz\MessengerWorkflow\Application\Task\ResultStoragePayload;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Connection;
 use Kraz\MessengerWorkflow\Infrastructure\Doctrine\Inbox\InboxTransport;
@@ -16,6 +18,7 @@ use Kraz\MessengerWorkflow\Infrastructure\Messenger\Middleware\CommandNotifierMi
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\Stamp\MessageIdStamp;
 use Kraz\MessengerWorkflow\Infrastructure\Messenger\Stamp\ResultTrackedStamp;
 use Kraz\MessengerWorkflow\Infrastructure\Task\InMemoryResultStorage;
+use PhpAmqpLib\Message\AMQPMessage;
 use PHPUnit\Framework\TestCase;
 use Psr\Container\ContainerInterface;
 use Symfony\Component\Messenger\Envelope;
@@ -73,12 +76,13 @@ final class CommandNotifierMiddlewareTest extends TestCase
     }
 
     /**
-     * @param array<string, object> $transports
+     * @param array<string, object>      $transports
+     * @param array<string, string|null> $notifierByQueue
      */
-    private function bus(array $transports, mixed $handlerResult = 'the-result', bool $withHandler = true): MessageBus
+    private function bus(array $transports, mixed $handlerResult = 'the-result', bool $withHandler = true, array $notifierByQueue = []): MessageBus
     {
         $middleware = [
-            new CommandNotifierMiddleware($this->locator($transports), $this->transportRegistry, $this->resultStorage),
+            new CommandNotifierMiddleware($this->locator($transports), $this->transportRegistry, $this->resultStorage, $notifierByQueue),
         ];
         if ($withHandler) {
             $middleware[] = new class($handlerResult) implements MiddlewareInterface {
@@ -96,9 +100,9 @@ final class CommandNotifierMiddlewareTest extends TestCase
         return new MessageBus($middleware);
     }
 
-    private function trackedEnvelope(?string $messageId = null): Envelope
+    private function trackedEnvelope(?string $messageId = null, string $receiver = self::RECEIVER): Envelope
     {
-        $stamps = [new ReceivedStamp(self::RECEIVER), new ResultTrackedStamp()];
+        $stamps = [new ReceivedStamp($receiver), new ResultTrackedStamp()];
         if (null !== $messageId) {
             $stamps[] = new MessageIdStamp($messageId);
         }
@@ -187,5 +191,65 @@ final class CommandNotifierMiddlewareTest extends TestCase
         $this->bus([self::NOTIFIER => $this->notifierTransport])->dispatch($this->trackedEnvelope((string) Uuid::v7()));
 
         self::assertSame(1, $this->notifierTransport->getMessageCount());
+    }
+
+    // --- Routed queues: the compiled queue → notifier map ------------------------------
+
+    public function testTheCompiledMapRoutesARoutedInboxToTheContextsNotifier(): void
+    {
+        // Receiver "app_planning" has no "app_planning_notifier"; the map points it at
+        // the context's notifier — no silent fallback to the reduced flow.
+        $taskId = (string) Uuid::v7();
+        $this->bus([self::NOTIFIER => $this->notifierTransport], notifierByQueue: ['app_planning' => self::NOTIFIER])
+            ->dispatch($this->trackedEnvelope($taskId, 'app_planning'));
+
+        self::assertSame(1, $this->notifierTransport->getMessageCount());
+        $this->expectExceptionMessageMatches('/timeout/');
+        $this->resultStorage->await($taskId, 1);
+    }
+
+    public function testTheCompiledMapResolvesTheBrokerQueueInNoInboxMode(): void
+    {
+        $taskId = (string) Uuid::v7();
+        $envelope = new Envelope(new DoSomethingCommand('p'), [
+            new ReceivedStamp('commands'),
+            new ResultTrackedStamp(),
+            new MessageIdStamp($taskId),
+            new AmqpReceivedStamp(new AmqpEnvelope(new AMQPMessage('{}')), 'app_planning'),
+        ]);
+
+        $this->bus([self::NOTIFIER => $this->notifierTransport], notifierByQueue: ['app_planning' => self::NOTIFIER])->dispatch($envelope);
+
+        self::assertSame(1, $this->notifierTransport->getMessageCount());
+    }
+
+    public function testTheCompiledMapWinsOverTheNamingConvention(): void
+    {
+        $other = new OutboxTransport(new Connection(['table_name' => 'other', 'index_table_name' => 'other_idx'], $this->dbal), new PhpSerializer());
+        $other->setup();
+
+        $this->bus([self::NOTIFIER => $this->notifierTransport, 'other' => $other], notifierByQueue: [self::RECEIVER => 'other'])
+            ->dispatch($this->trackedEnvelope((string) Uuid::v7()));
+
+        self::assertSame(1, $other->getMessageCount());
+        self::assertSame(0, $this->notifierTransport->getMessageCount());
+    }
+
+    public function testANullMapEntryIsTheReducedFlowOnPurpose(): void
+    {
+        $taskId = (string) Uuid::v7();
+        $this->bus([self::NOTIFIER => $this->notifierTransport], notifierByQueue: [self::RECEIVER => null])
+            ->dispatch($this->trackedEnvelope($taskId));
+
+        self::assertSame(0, $this->notifierTransport->getMessageCount(), 'The convention is not consulted');
+        self::assertSame('the-result', $this->resultStorage->await($taskId, 1));
+    }
+
+    public function testAMappedNotifierThatIsNotConfiguredFailsPermanently(): void
+    {
+        $this->expectException(UnrecoverableMessageHandlingException::class);
+        $this->expectExceptionMessageMatches('/"missing_notifier" resolved for the receiving transport "app_planning" is not configured/');
+
+        $this->bus([], notifierByQueue: ['app_planning' => 'missing_notifier'])->dispatch($this->trackedEnvelope((string) Uuid::v7(), 'app_planning'));
     }
 }

@@ -28,6 +28,12 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
  * the inbox's database connection (validated here), the notification commits
  * atomically with the handler's writes and the inbox row removal.
  *
+ * Routed queues (a dedicated queue serving selected command classes of a context)
+ * publish through the notifier of their context: ConfigureTransportsPass compiles a
+ * `queue → notifier transport` map that takes precedence over the naming convention,
+ * so "warehouse_planning" resolves to "warehouse_commands_notifier" — one notifier outbox and
+ * one notifier worker per context. A null entry means the reduced flow on purpose.
+ *
  * Reduced flows: with no "<receiver>_notifier" transport configured, the result is
  * written to the result storage directly from the handler worker — no outbox
  * guarantee (a dual write), which is the informed trade-off of removing the notifier
@@ -39,10 +45,14 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
  */
 class CommandNotifierMiddleware implements MiddlewareInterface
 {
+    /**
+     * @param array<string, string|null> $notifierByQueue receiving transport / broker queue name → notifier transport name (null: no notifier, deliberately)
+     */
     public function __construct(
         private readonly ContainerInterface $receiverLocator,
         private readonly WorkflowTransportRegistry $transportRegistry,
         private readonly ResultStorageInterface $resultStorage,
+        private readonly array $notifierByQueue = [],
     ) {
     }
 
@@ -66,15 +76,12 @@ class CommandNotifierMiddleware implements MiddlewareInterface
         // Inbox mode: the receiving transport is named after the broker queue, so
         // "<transport>_notifier" is the convention. No-inbox mode: the receiving
         // transport is the broker itself — the queue name (jwage received stamp)
-        // keeps the same "<queue>_notifier" convention.
+        // keeps the same "<queue>_notifier" convention. The compiled map (routed
+        // queues) wins over the convention.
         $receiverName = $received->getTransportName();
-        $notifierTransport = $this->resolveNotifierTransport($receiverName);
-        if (null === $notifierTransport) {
-            $queueName = $envelope->last(AmqpReceivedStamp::class)?->getQueueName();
-            if (null !== $queueName && $queueName !== $receiverName) {
-                $notifierTransport = $this->resolveNotifierTransport($queueName);
-            }
-        }
+        $queueName = $envelope->last(AmqpReceivedStamp::class)?->getQueueName();
+        $notifierName = $this->resolveNotifierName($receiverName, $queueName);
+        $notifierTransport = null !== $notifierName ? $this->resolveNotifierTransport($notifierName, $receiverName) : null;
 
         $envelope = $stack->next()->handle($envelope, $stack);
 
@@ -95,11 +102,27 @@ class CommandNotifierMiddleware implements MiddlewareInterface
         return $envelope;
     }
 
-    private function resolveNotifierTransport(string $receiverName): ?OutboxTransport
+    private function resolveNotifierName(string $receiverName, ?string $queueName): ?string
     {
-        $notifierName = $receiverName.'_notifier';
+        foreach (array_unique([$receiverName, $queueName]) as $name) {
+            if (null !== $name && \array_key_exists($name, $this->notifierByQueue)) {
+                return $this->notifierByQueue[$name];
+            }
+        }
+
+        foreach (array_unique([$receiverName, $queueName]) as $name) {
+            if (null !== $name && $this->receiverLocator->has($name.'_notifier')) {
+                return $name.'_notifier';
+            }
+        }
+
+        return null;
+    }
+
+    private function resolveNotifierTransport(string $notifierName, string $receiverName): OutboxTransport
+    {
         if (!$this->receiverLocator->has($notifierName)) {
-            return null;
+            throw new UnrecoverableMessageHandlingException(\sprintf('The notifier transport "%s" resolved for the receiving transport "%s" is not configured.', $notifierName, $receiverName));
         }
 
         $notifierTransport = $this->receiverLocator->get($notifierName);

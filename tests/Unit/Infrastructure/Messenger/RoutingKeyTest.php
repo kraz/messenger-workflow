@@ -76,6 +76,42 @@ final class RoutingKeyTest extends TestCase
         );
     }
 
+    public function testWithRouteAppendsOneSegment(): void
+    {
+        self::assertSame(
+            'commands.internal.Kraz.planning',
+            (string) RoutingKey::createForDirectTransport(new TestCommand(), 'commands')->withRoute('planning'),
+        );
+        self::assertSame(
+            'commands.Demo.planning',
+            (string) RoutingKey::createForDirectTransport(new DoSomethingCommand(), 'commands')->withRoute('planning'),
+        );
+    }
+
+    public function testWithRouteDoesNotSkipARouteEqualToTheContextName(): void
+    {
+        // Unlike the constructor's suffix, a route is always appended: a context named
+        // like the route must still get a key distinct from its plain context key.
+        self::assertSame(
+            'commands.internal.planning.planning',
+            (string) RoutingKey::createForDirectTransport('internal.planning', 'commands')->withRoute('planning'),
+        );
+    }
+
+    public function testWithRouteRejectsMultiSegmentAndWildcardRoutes(): void
+    {
+        $key = RoutingKey::createForDirectTransport(new TestCommand(), 'commands');
+
+        foreach (['a.b', '#', '*', '', 'no-dash'] as $invalid) {
+            try {
+                $key->withRoute($invalid);
+                self::fail(\sprintf('Route "%s" must be rejected', $invalid));
+            } catch (\InvalidArgumentException $exception) {
+                self::assertStringContainsString('one routing-key segment', $exception->getMessage());
+            }
+        }
+    }
+
     /**
      * Regression test (ported): classes under the App\ namespace must route by their
      * module segment instead of collapsing to "internal.App".
