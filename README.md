@@ -57,7 +57,8 @@ commands and what happens at each hop — in **[MESSAGE_FLOWS.md](MESSAGE_FLOWS.
   writes on the same connection commit atomically with the message consumption. Competing
   consumers via `FOR UPDATE SKIP LOCKED` (commands default) or single-consumer FIFO
   (events default); long-running handlers stay protected from redelivery via
-  `messenger:consume --keepalive`.
+  `messenger:consume --keepalive`. Processed dedup entries are removed with
+  [`messenger:prune-inbox`](#pruning-the-inbox-dedup-index) after a retention of days.
 - **Tracked tasks**: tracked command results and all query results land in the result storage
   (Redis in production, in-memory for tests/dev) under `rs:[<ns>:]<uuid>`. Optional task services
   add ownership records, a status provider (`pending|completed|failed`, plus `unknown` for a
@@ -620,6 +621,30 @@ before applying its side effects" from "failed after": whether a replay is safe 
 of the handler, not of the message's delivery history. Idempotent handlers and
 `transactional_handler=true` are the supported mechanisms; the bypass is deliberate and will
 stay.
+
+## Pruning the inbox dedup index
+
+Acking or permanently rejecting an inbox message deletes the inbox row but keeps its entry in
+the dedup index table (`<table_name>_index`), marked `processed_at`. That entry is what drops
+a broker redelivery of the same UUID, and nothing removes it, so the index grows without
+limit. `messenger:prune-inbox` deletes the entries processed more than `--retention-days` ago:
+
+```bash
+bin/console messenger:prune-inbox                                   # every inbox transport, 7 days
+bin/console messenger:prune-inbox --retention-days=30 app_commands  # selected inboxes
+bin/console messenger:prune-inbox --dry-run                         # count only
+```
+
+Pending entries (`processed_at` still NULL) are never touched. Rows are deleted in batches
+(`--batch-size`, default 1000), and each batch commits separately, so the command can run from
+cron next to the live workers.
+
+Once an entry is pruned, a redelivery of that UUID is **handled again**. So the retention is
+counted in whole days (minimum 1, default 7). It must stay far longer than every window in
+which a duplicate can still arrive: `redeliver_timeout`, the flow retry budgets, an outbox relay
+republishing after a crash, and a broker holding the deliveries of a receiver that is down. All
+of these are seconds to minutes, apart from an outage. Choose a retention that also covers your
+longest plausible receiver outage.
 
 ## Testing
 

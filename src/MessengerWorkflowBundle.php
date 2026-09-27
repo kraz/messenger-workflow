@@ -16,6 +16,7 @@ use Kraz\MessengerWorkflow\Application\Task\TaskOwnershipRegistryInterface;
 use Kraz\MessengerWorkflow\Application\Task\TaskResultProviderInterface;
 use Kraz\MessengerWorkflow\Application\Task\TaskStatusProviderInterface;
 use Kraz\MessengerWorkflow\Domain\OutboxBusInterface;
+use Kraz\MessengerWorkflow\Infrastructure\Console\MessengerPruneInboxCommand;
 use Kraz\MessengerWorkflow\Infrastructure\Console\MessengerSupervisorConfigCommand;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\ConfigureTransportsPass;
 use Kraz\MessengerWorkflow\Infrastructure\DependencyInjection\Compiler\DeriveWorkersPass;
@@ -497,6 +498,13 @@ class MessengerWorkflowBundle extends AbstractBundle
             ->arg('$workersConfig', '%messenger_workflow.workers%')
             ->arg('$workersDefaultConfig', '%messenger_workflow.workflow.worker_defaults%')
             ->arg('$params', service('parameter_bag'))
+            ->tag('console.command');
+
+        $services->set('messenger_workflow.prune_inbox_command')
+            ->class(MessengerPruneInboxCommand::class)
+            ->arg('$transportLocator', service('messenger.receiver_locator'))
+            // Replaced with the messenger transport names by ConfigureTransportsPass.
+            ->arg('$transportNames', [])
             ->tag('console.command');
     }
 

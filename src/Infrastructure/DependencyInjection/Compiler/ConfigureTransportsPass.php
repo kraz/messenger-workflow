@@ -80,6 +80,33 @@ final class ConfigureTransportsPass implements CompilerPassInterface
         $this->configureMessageBrokerForTransport('events', $container, true);
         $this->configureMessageBrokerForTransport('commands', $container);
         $this->configureMessageBrokerForTransport('queries', $container);
+
+        $this->configurePruneInboxCommand($container);
+    }
+
+    /**
+     * Hands the prune command every messenger transport name (the receiver aliases).
+     * It picks the inbox transports at runtime: a DSN may come from an env var, so the
+     * scheme is not always known at compile time.
+     */
+    private function configurePruneInboxCommand(ContainerBuilder $container): void
+    {
+        if (!$container->hasDefinition('messenger_workflow.prune_inbox_command')) {
+            return;
+        }
+
+        $names = [];
+        foreach ($container->findTaggedServiceIds('messenger.receiver') as $tags) {
+            foreach ($tags as $tag) {
+                $alias = \is_array($tag) ? ($tag['alias'] ?? null) : null;
+                if (\is_string($alias) && '' !== $alias) {
+                    $names[] = $alias;
+                }
+            }
+        }
+
+        $container->getDefinition('messenger_workflow.prune_inbox_command')
+            ->replaceArgument('$transportNames', array_values(array_unique($names)));
     }
 
     /**

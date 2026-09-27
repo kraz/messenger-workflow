@@ -121,6 +121,89 @@ class Connection implements ResetInterface
         return $this->deduplicate;
     }
 
+    public function getIndexTableName(): string
+    {
+        return $this->indexTableName;
+    }
+
+    /**
+     * Counts the dedup index entries marked processed before the given moment — the
+     * entries {@see pruneProcessed()} would delete. Zero without deduplication or when
+     * the index table does not exist yet.
+     */
+    public function countProcessed(\DateTimeImmutable $processedBefore): int
+    {
+        if (!$this->deduplicate) {
+            return 0;
+        }
+
+        $queryBuilder = $this->driverConnection->createQueryBuilder()
+            ->select('COUNT(t.id)')
+            ->from($this->indexTableName, 't')
+            ->where('t.processed_at < ?');
+
+        try {
+            $count = $this->driverConnection->fetchOne($queryBuilder->getSQL(), [$processedBefore], [Types::DATETIME_IMMUTABLE]);
+        } catch (TableNotFoundException) {
+            return 0;
+        }
+
+        return is_numeric($count) ? (int) $count : 0;
+    }
+
+    /**
+     * Deletes the dedup index entries marked processed before the given moment, in
+     * batches of $batchSize rows (each batch commits on its own, so a large backlog never
+     * holds long locks). Entries still pending (processed_at NULL) are never touched.
+     *
+     * A pruned entry no longer drops a broker redelivery of its message UUID — the
+     * cut-off must lie far beyond every redelivery and retry window.
+     *
+     * @return int The number of deleted index entries
+     */
+    public function pruneProcessed(\DateTimeImmutable $processedBefore, int $batchSize = 1000): int
+    {
+        if (!$this->deduplicate) {
+            return 0;
+        }
+
+        $batchSize = max(1, $batchSize);
+        $selectSql = $this->driverConnection->createQueryBuilder()
+            ->select('t.id')
+            ->from($this->indexTableName, 't')
+            ->where('t.processed_at < ?')
+            ->orderBy('t.processed_at', 'ASC')
+            ->setMaxResults($batchSize)
+            ->getSQL();
+        $deleteSql = $this->driverConnection->createQueryBuilder()
+            ->delete($this->indexTableName)
+            ->where('id IN (?)')
+            ->andWhere('processed_at < ?')
+            ->getSQL();
+
+        $deleted = 0;
+        do {
+            try {
+                $ids = $this->driverConnection->fetchFirstColumn($selectSql, [$processedBefore], [Types::DATETIME_IMMUTABLE]);
+            } catch (TableNotFoundException) {
+                return $deleted;
+            }
+            if ([] === $ids) {
+                break;
+            }
+
+            $deleted += (int) $this->driverConnection->executeStatement($deleteSql, [
+                array_map(static fn (mixed $id): string => \is_scalar($id) ? (string) $id : '', $ids),
+                $processedBefore,
+            ], [
+                ArrayParameterType::STRING,
+                Types::DATETIME_IMMUTABLE,
+            ]);
+        } while (\count($ids) >= $batchSize);
+
+        return $deleted;
+    }
+
     /**
      * @param array<array-key, mixed> $options
      *
@@ -566,7 +649,9 @@ class Connection implements ResetInterface
     private function markMessageAsProcessed(int|string $id, ?string $messageId = null): bool
     {
         try {
-            $now = new \DateTimeImmutable();
+            // UTC like every other timestamp of the table pair — pruneProcessed() compares
+            // processed_at against a UTC cut-off.
+            $now = new \DateTimeImmutable('UTC');
             if ($this->deduplicate) {
                 if (null === $messageId || '' === $messageId) {
                     throw new \RuntimeException('The transport is configured with message deduplication. The message ID is required!');

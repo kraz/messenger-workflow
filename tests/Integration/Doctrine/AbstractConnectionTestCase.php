@@ -244,4 +244,106 @@ abstract class AbstractConnectionTestCase extends TestCase
         self::assertCount(2, $connection->findAll(2));
         self::assertCount(3, $connection->findAll());
     }
+
+    public function testAckStoresProcessedAtInUtc(): void
+    {
+        $defaultTimezone = date_default_timezone_get();
+        date_default_timezone_set('Pacific/Kiritimati'); // UTC+14: a local timestamp would be far off
+        try {
+            $connection = $this->createConnection(['deduplicate' => true]);
+            $connection->setup();
+            $uuid = (string) Uuid::v7();
+            $id = $connection->send('body', [], 0, $uuid);
+            self::assertNotNull($id);
+            $connection->ack($id, $uuid);
+        } finally {
+            date_default_timezone_set($defaultTimezone);
+        }
+
+        $processedAt = $connection->getDriverConnection()->fetchOne("SELECT processed_at FROM {$this->indexTableName} WHERE id = ?", [$uuid]);
+        self::assertIsString($processedAt);
+        $delta = abs(new \DateTimeImmutable($processedAt, new \DateTimeZone('UTC'))->getTimestamp() - time());
+        self::assertLessThan(60, $delta, 'processed_at must be written in UTC, like created_at and delivered_at');
+    }
+
+    public function testPruneProcessedDeletesOnlyEntriesProcessedBeforeTheCutOff(): void
+    {
+        $connection = $this->createConnection(['deduplicate' => true]);
+        $connection->setup();
+
+        $old = $this->processedEntry($connection, '-10 days');
+        $recent = $this->processedEntry($connection, '-1 hour');
+        $pending = (string) Uuid::v7();
+        self::assertNotNull($connection->send('pending', [], 0, $pending));
+
+        $cutOff = new \DateTimeImmutable('-7 days', new \DateTimeZone('UTC'));
+        self::assertSame(1, $connection->countProcessed($cutOff));
+        self::assertSame(1, $connection->pruneProcessed($cutOff));
+
+        $expected = [$pending, $recent];
+        sort($expected);
+        self::assertSame($expected, $this->indexedIds($connection));
+        self::assertSame(1, $connection->getMessageCount(), 'The pending inbox row is untouched');
+        self::assertNull($connection->send('pending', [], 0, $pending), 'A pending entry still deduplicates');
+        self::assertNull($connection->send('recent', [], 0, $recent), 'A retained entry still deduplicates');
+        self::assertNotNull($connection->send('old', [], 0, $old), 'A pruned entry no longer deduplicates');
+    }
+
+    public function testPruneProcessedWorksInBatches(): void
+    {
+        $connection = $this->createConnection(['deduplicate' => true]);
+        $connection->setup();
+        for ($i = 0; $i < 5; ++$i) {
+            $this->processedEntry($connection, '-30 days');
+        }
+        $kept = $this->processedEntry($connection, '-1 day');
+
+        self::assertSame(5, $connection->pruneProcessed(new \DateTimeImmutable('-7 days', new \DateTimeZone('UTC')), 2));
+        self::assertSame([$kept], $this->indexedIds($connection));
+    }
+
+    public function testPruneProcessedIsANoOpWithoutDeduplicationOrIndexTable(): void
+    {
+        $cutOff = new \DateTimeImmutable('UTC');
+
+        $plain = $this->createConnection();
+        $plain->setup();
+        self::assertSame(0, $plain->countProcessed($cutOff));
+        self::assertSame(0, $plain->pruneProcessed($cutOff));
+
+        $notSetUp = $this->createConnection(['deduplicate' => true]);
+        self::assertSame(0, $notSetUp->countProcessed($cutOff));
+        self::assertSame(0, $notSetUp->pruneProcessed($cutOff));
+    }
+
+    /**
+     * Sends and acks a deduplicated message, then backdates its processed_at.
+     */
+    private function processedEntry(Connection $connection, string $processedAgo): string
+    {
+        $uuid = (string) Uuid::v7();
+        $id = $connection->send('body', [], 0, $uuid);
+        self::assertNotNull($id);
+        self::assertTrue($connection->ack($id, $uuid));
+
+        $connection->getDriverConnection()->executeStatement(
+            "UPDATE {$this->indexTableName} SET processed_at = ? WHERE id = ?",
+            [new \DateTimeImmutable($processedAgo, new \DateTimeZone('UTC')), $uuid],
+            [\Doctrine\DBAL\Types\Types::DATETIME_IMMUTABLE],
+        );
+
+        return $uuid;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function indexedIds(Connection $connection): array
+    {
+        $ids = $connection->getDriverConnection()->fetchFirstColumn("SELECT id FROM {$this->indexTableName}");
+        $ids = array_map(static fn (mixed $id): string => \is_scalar($id) ? (string) $id : '', $ids);
+        sort($ids);
+
+        return $ids;
+    }
 }
